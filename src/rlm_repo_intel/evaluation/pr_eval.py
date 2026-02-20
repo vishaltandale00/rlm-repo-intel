@@ -1,6 +1,7 @@
 """Evaluate PRs against the codebase model using RLM."""
 
 import json
+import re
 from pathlib import Path
 from dataclasses import dataclass, asdict
 
@@ -130,7 +131,7 @@ def _evaluate_single_pr(
 
     # Step 1: Identify what this PR touches
     # (In production, we'd parse the diff. For now, use metadata)
-    changed_files = []  # Would come from PR diff parsing
+    changed_files = parse_pr_diff_files(pr.get("diff", "") or "")
     touched_modules = graph.map_files_to_modules(changed_files)
 
     # Step 2: Build compact evaluation context from graph
@@ -140,7 +141,7 @@ def _evaluate_single_pr(
             context_cards[mod_id] = module_cards[mod_id]
 
     # Step 3: Check for linked issues
-    linked_issues = _extract_issue_refs(pr.get("body", "") or "")
+    linked_issues = extract_issue_refs(pr.get("body", "") or "")
 
     # Step 4: Build prompt with codebase intelligence
     prompt = f"""Evaluate this GitHub PR against the codebase understanding.
@@ -210,8 +211,47 @@ Return as JSON."""
 
 def _extract_issue_refs(text: str) -> list[int]:
     """Extract issue references (#123) from PR body."""
-    import re
-    return [int(m) for m in re.findall(r"#(\d+)", text)]
+    return extract_issue_refs(text)
+
+
+def extract_issue_refs(text: str) -> list[int]:
+    """Extract unique issue references in encounter order."""
+    found = []
+    seen = set()
+    for match in re.findall(r"#(\d+)", text):
+        issue_num = int(match)
+        if issue_num in seen:
+            continue
+        seen.add(issue_num)
+        found.append(issue_num)
+    return found
+
+
+def parse_pr_diff_files(diff_text: str) -> list[str]:
+    """Parse changed file paths from a unified git diff."""
+    if not diff_text:
+        return []
+
+    files = []
+    seen = set()
+    for line in diff_text.splitlines():
+        if not line.startswith("diff --git "):
+            continue
+
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+
+        rhs = parts[3]
+        if rhs == "/dev/null":
+            continue
+        if rhs.startswith("b/"):
+            rhs = rhs[2:]
+        if rhs not in seen:
+            seen.add(rhs)
+            files.append(rhs)
+
+    return files
 
 
 def _parse_json_response(response: str) -> dict:

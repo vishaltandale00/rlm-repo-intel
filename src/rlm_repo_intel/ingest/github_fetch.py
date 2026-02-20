@@ -9,52 +9,32 @@ from rich.progress import Progress
 
 console = Console()
 
-# Fields to fetch for PRs
-PR_FIELDS = [
-    "number", "title", "body", "state", "author", "labels",
-    "createdAt", "updatedAt", "mergedAt", "closedAt",
-    "additions", "deletions", "changedFiles",
-    "headRefName", "baseRefName",
-    "reviewDecision", "url",
-]
 
-# Fields to fetch for issues
-ISSUE_FIELDS = [
-    "number", "title", "body", "state", "author", "labels",
-    "createdAt", "updatedAt", "closedAt",
-    "comments", "url",
-]
-
-
-def fetch_prs(owner: str, name: str, output_dir: Path, batch_size: int = 100) -> int:
-    """Fetch all PRs using gh CLI. Returns count."""
+def fetch_prs(
+    owner: str,
+    name: str,
+    output_dir: Path,
+    batch_size: int = 100,
+    max_items: int | None = None,
+) -> int:
+    """Fetch PRs using gh api pagination. Returns count."""
     output_dir.mkdir(parents=True, exist_ok=True)
     repo = f"{owner}/{name}"
 
-    # Get total count first
-    result = subprocess.run(
-        ["gh", "api", f"repos/{repo}", "--jq", ".open_issues_count"],
-        capture_output=True, text=True,
-    )
-
     all_prs = []
-    cursor = ""
+    page = 1
+    per_page = max(1, min(batch_size, 100))
 
     with Progress() as progress:
         task = progress.add_task("Fetching PRs...", total=None)
 
         while True:
-            cmd = [
-                "gh", "pr", "list",
-                "--repo", repo,
-                "--state", "all",
-                "--limit", str(batch_size),
-                "--json", ",".join(PR_FIELDS),
-            ]
-            if cursor:
-                cmd.extend(["--cursor", cursor])
-
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            endpoint = f"repos/{repo}/pulls?state=all&per_page={per_page}&page={page}"
+            result = subprocess.run(
+                ["gh", "api", endpoint],
+                capture_output=True,
+                text=True,
+            )
             if result.returncode != 0:
                 console.print(f"[red]Error fetching PRs: {result.stderr}[/]")
                 break
@@ -63,11 +43,17 @@ def fetch_prs(owner: str, name: str, output_dir: Path, batch_size: int = 100) ->
             if not batch:
                 break
 
-            all_prs.extend(batch)
+            all_prs.extend(_normalize_pr(pr) for pr in batch)
+            if max_items is not None and len(all_prs) >= max_items:
+                all_prs = all_prs[:max_items]
+                progress.update(task, completed=len(all_prs))
+                break
+
             progress.update(task, completed=len(all_prs))
 
-            if len(batch) < batch_size:
+            if len(batch) < per_page:
                 break
+            page += 1
 
     # Save as JSONL for streaming access
     jsonl_path = output_dir / "all_prs.jsonl"
@@ -84,25 +70,24 @@ def fetch_prs(owner: str, name: str, output_dir: Path, batch_size: int = 100) ->
 
 
 def fetch_issues(owner: str, name: str, output_dir: Path, batch_size: int = 100) -> int:
-    """Fetch all issues using gh CLI. Returns count."""
+    """Fetch issues using gh api pagination. Returns count."""
     output_dir.mkdir(parents=True, exist_ok=True)
     repo = f"{owner}/{name}"
 
     all_issues = []
+    page = 1
+    per_page = max(1, min(batch_size, 100))
 
     with Progress() as progress:
         task = progress.add_task("Fetching issues...", total=None)
 
         while True:
-            cmd = [
-                "gh", "issue", "list",
-                "--repo", repo,
-                "--state", "all",
-                "--limit", str(batch_size),
-                "--json", ",".join(ISSUE_FIELDS),
-            ]
-
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            endpoint = f"repos/{repo}/issues?state=all&per_page={per_page}&page={page}"
+            result = subprocess.run(
+                ["gh", "api", endpoint],
+                capture_output=True,
+                text=True,
+            )
             if result.returncode != 0:
                 console.print(f"[red]Error fetching issues: {result.stderr}[/]")
                 break
@@ -111,11 +96,15 @@ def fetch_issues(owner: str, name: str, output_dir: Path, batch_size: int = 100)
             if not batch:
                 break
 
-            all_issues.extend(batch)
+            for issue in batch:
+                if "pull_request" in issue:
+                    continue
+                all_issues.append(_normalize_issue(issue))
             progress.update(task, completed=len(all_issues))
 
-            if len(batch) < batch_size:
+            if len(batch) < per_page:
                 break
+            page += 1
 
     # Save as JSONL
     jsonl_path = output_dir / "all_issues.jsonl"
@@ -138,3 +127,43 @@ def fetch_pr_diff(owner: str, name: str, pr_number: int) -> str:
         capture_output=True, text=True,
     )
     return result.stdout if result.returncode == 0 else ""
+
+
+def _normalize_pr(pr: dict) -> dict:
+    """Map GitHub REST PR payload to expected ingest schema."""
+    return {
+        "number": pr.get("number"),
+        "title": pr.get("title"),
+        "body": pr.get("body"),
+        "state": pr.get("state"),
+        "author": pr.get("user"),
+        "labels": pr.get("labels", []),
+        "createdAt": pr.get("created_at"),
+        "updatedAt": pr.get("updated_at"),
+        "mergedAt": pr.get("merged_at"),
+        "closedAt": pr.get("closed_at"),
+        "additions": pr.get("additions", 0),
+        "deletions": pr.get("deletions", 0),
+        "changedFiles": pr.get("changed_files", 0),
+        "headRefName": (pr.get("head") or {}).get("ref"),
+        "baseRefName": (pr.get("base") or {}).get("ref"),
+        "reviewDecision": None,
+        "url": pr.get("html_url"),
+    }
+
+
+def _normalize_issue(issue: dict) -> dict:
+    """Map GitHub REST issue payload to expected ingest schema."""
+    return {
+        "number": issue.get("number"),
+        "title": issue.get("title"),
+        "body": issue.get("body"),
+        "state": issue.get("state"),
+        "author": issue.get("user"),
+        "labels": issue.get("labels", []),
+        "createdAt": issue.get("created_at"),
+        "updatedAt": issue.get("updated_at"),
+        "closedAt": issue.get("closed_at"),
+        "comments": issue.get("comments", 0),
+        "url": issue.get("html_url"),
+    }

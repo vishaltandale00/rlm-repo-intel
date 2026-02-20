@@ -44,7 +44,7 @@ def build_structural_graph(repo_dir: Path, config: dict) -> dict:
     imports = _extract_imports(files, repo_dir)
 
     # Step 4: Identify candidate modules (directories with meaningful code)
-    modules = _identify_modules(dir_tree, files)
+    modules = _identify_modules(dir_tree, files, repo_dir)
     console.print(f"  Identified {len(modules)} candidate modules")
 
     # Step 5: Get git churn data
@@ -142,11 +142,15 @@ def _build_dir_tree(files: list[Path], repo_dir: Path) -> dict:
     return dict(tree)
 
 
-def _identify_modules(dir_tree: dict, files: list[Path]) -> dict:
+def _identify_modules(dir_tree: dict, files: list[Path], repo_dir: Path) -> dict:
     """Identify candidate modules — directories that represent logical units.
     
     Heuristic: directories 2-3 levels deep with >= 3 source files.
     """
+    file_sizes = {
+        str(file_path.relative_to(repo_dir)): file_path.stat().st_size for file_path in files
+    }
+
     modules = {}
     for dir_path, info in dir_tree.items():
         depth = len(Path(dir_path).parts)
@@ -154,7 +158,10 @@ def _identify_modules(dir_tree: dict, files: list[Path]) -> dict:
             modules[dir_path] = {
                 "file_count": len(info["files"]),
                 "total_bytes": info["bytes"],
-                "top_files": sorted(info["files"], key=lambda f: -Path(f).stat().st_size if Path(f).exists() else 0)[:10],
+                "top_files": sorted(
+                    info["files"],
+                    key=lambda rel_file: -file_sizes.get(rel_file, 0),
+                )[:10],
             }
     return modules
 

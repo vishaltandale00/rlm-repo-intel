@@ -1,5 +1,6 @@
 """Configuration loader."""
 
+import copy
 from pathlib import Path
 
 import yaml
@@ -38,13 +39,14 @@ DEFAULT_CONFIG = {
         "confidence_threshold": 0.72,
         "escalation_pct": 0.20,
         "pair_candidates_max": 15_000,
+        "ingest_pr_limit": 100,
     },
 }
 
 
 def load_config(path: str) -> dict:
     """Load config from YAML file, falling back to defaults."""
-    config = DEFAULT_CONFIG.copy()
+    config = copy.deepcopy(DEFAULT_CONFIG)
     config_path = Path(path)
 
     if config_path.exists():

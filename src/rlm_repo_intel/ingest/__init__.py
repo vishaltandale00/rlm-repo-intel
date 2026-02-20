@@ -19,8 +19,9 @@ def run_ingest(
     config: dict,
 ):
     """Full ingest pipeline: clone repo, fetch PRs/issues, build structural graph."""
-    repo_dir = Path(config["paths"]["repo_dir"])
+    repo_dir = Path(config["paths"]["repo_dir"]) / owner / name
     data_dir = Path(config["paths"]["data_dir"])
+    pr_limit = config.get("limits", {}).get("ingest_pr_limit", 100)
 
     # Step 1: Clone or pull the repository
     console.print(f"\n[bold blue]Step 1:[/] Cloning/pulling {owner}/{name}...")
@@ -29,7 +30,7 @@ def run_ingest(
     # Step 2: Fetch PRs
     if include_prs:
         console.print(f"\n[bold blue]Step 2:[/] Fetching PRs...")
-        pr_count = fetch_prs(owner, name, data_dir / "prs")
+        pr_count = fetch_prs(owner, name, data_dir / "prs", max_items=pr_limit)
         console.print(f"  → {pr_count} PRs fetched")
 
     # Step 3: Fetch Issues
