@@ -1,6 +1,5 @@
 "use client";
 
-import { AgentDebateLog } from "@/components/agent-debate-log";
 import { ClusterView } from "@/components/cluster-view";
 import { LiveStatusBar } from "@/components/live-status-bar";
 import { PRTable } from "@/components/pr-table";
@@ -12,10 +11,17 @@ import {
   RankingData,
   SummaryData,
 } from "@/components/types";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
+interface RunTab {
+  id: string;
+  timestamp: string;
+}
+
 interface DashboardClientProps {
+  runs: RunTab[];
+  selectedRunId: string | null;
   summary: SummaryData | null;
   evaluations: EvaluationItem[];
   clusters: ClusterItem[];
@@ -28,7 +34,59 @@ function formatTraceTime(timestamp: string) {
   return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString();
 }
 
-export function DashboardClient({ summary, evaluations, clusters, ranking, trace }: DashboardClientProps) {
+function formatRunLabel(run: RunTab, index: number) {
+  const date = new Date(run.timestamp);
+  const dateLabel = Number.isNaN(date.getTime())
+    ? run.id
+    : date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  return `Run ${index + 1} - ${dateLabel}`;
+}
+
+function RunSelector({ runs, selectedRunId }: { runs: RunTab[]; selectedRunId: string | null }) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  const onSelect = (runId: string) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("run", runId);
+    router.push(`${pathname}?${params.toString()}`);
+  };
+
+  if (runs.length === 0) {
+    return (
+      <section className="rounded-lg border border-neutral-800 bg-neutral-950/80 px-4 py-3 text-sm text-neutral-400">
+        No runs yet.
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-lg border border-neutral-800 bg-neutral-950/80 p-2">
+      <div className="flex flex-wrap gap-2">
+        {runs.map((run, index) => {
+          const selected = run.id === selectedRunId;
+          return (
+            <button
+              key={run.id}
+              type="button"
+              onClick={() => onSelect(run.id)}
+              className={`rounded-md border px-3 py-2 text-xs font-medium transition ${
+                selected
+                  ? "border-blue-400/50 bg-blue-500/20 text-blue-200"
+                  : "border-neutral-700 bg-neutral-900 text-neutral-300 hover:border-neutral-500"
+              }`}
+            >
+              {formatRunLabel(run, index)}
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+export function DashboardClient({ runs, selectedRunId, summary, evaluations, clusters, ranking, trace }: DashboardClientProps) {
   const router = useRouter();
   const firstTracePR = useMemo(
     () =>
@@ -55,17 +113,11 @@ export function DashboardClient({ summary, evaluations, clusters, ranking, trace
 
   return (
     <div className="grid gap-6">
+      <RunSelector runs={runs} selectedRunId={selectedRunId} />
+
       <LiveStatusBar summary={summary} evaluatedCount={evaluations.length} />
 
       <Summary data={summary} />
-
-      <section>
-        <h2 className="mb-3 text-lg font-semibold tracking-tight text-neutral-100">Agent Discussion View</h2>
-        <p className="mb-3 text-xs text-neutral-400">
-          Click any PR from Top PRs or Clusters to open its debate trace here.
-        </p>
-        <AgentDebateLog evaluations={evaluations} selectedPR={selectedPR} onSelectPR={setSelectedPR} />
-      </section>
 
       <section>
         <h2 className="mb-3 text-lg font-semibold tracking-tight text-neutral-100">Top PRs</h2>

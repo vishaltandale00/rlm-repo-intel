@@ -1,6 +1,14 @@
 import { DashboardClient } from "@/components/dashboard-client";
 import { EvaluationItem } from "@/components/types";
-import { headers } from "next/headers";
+import {
+  getAgentTrace,
+  getClusters,
+  getEvaluations,
+  getLatestRunId,
+  getRanking,
+  getRuns,
+  getSummary,
+} from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 30;
@@ -71,60 +79,54 @@ function normalizeEvaluation(raw: unknown): EvaluationItem | null {
   };
 }
 
-async function getBaseApiUrl() {
-  const configured = process.env.DATA_URL?.trim();
-  if (configured && /^https?:\/\//i.test(configured)) {
-    return configured.replace(/\/$/, "");
-  }
-
-  const h = await headers();
-  const host = h.get("x-forwarded-host") ?? h.get("host");
-  const proto = h.get("x-forwarded-proto") ?? "https";
-  const origin = host ? `${proto}://${host}` : "http://localhost:3000";
-  const prefix = configured?.startsWith("/") ? configured : "/api";
-  return `${origin}${prefix}`.replace(/\/$/, "");
-}
-
-async function getData() {
-  const base = await getBaseApiUrl();
-  const fetchJson = async (path: string) => {
-    const response = await fetch(`${base}${path}`, { cache: "no-store" });
-    if (!response.ok) throw new Error(`Failed fetch: ${path}`);
-    return response.json();
-  };
-
-  try {
-    const [summary, evaluations, clusters, ranking, trace] = await Promise.all([
-      fetchJson("/summary").catch(() => null),
-      fetchJson("/evaluations").catch(() => []),
-      fetchJson("/clusters").catch(() => []),
-      fetchJson("/ranking").catch(() => null),
-      fetchJson("/trace").catch(() => []),
-    ]);
-
-    const normalizedEvaluations = Array.isArray(evaluations)
-      ? evaluations.map(normalizeEvaluation).filter((value): value is EvaluationItem => Boolean(value))
-      : [];
-
-    return { summary, evaluations: normalizedEvaluations, clusters, ranking, trace };
-  } catch {
+async function getData(selectedRunId: string | null) {
+  if (!selectedRunId) {
     return { summary: null, evaluations: [], clusters: [], ranking: null, trace: [] };
   }
+
+  const [summary, evaluations, clusters, ranking, trace] = await Promise.all([
+    getSummary(selectedRunId),
+    getEvaluations(selectedRunId),
+    getClusters(selectedRunId),
+    getRanking(selectedRunId),
+    getAgentTrace(selectedRunId),
+  ]);
+
+  const normalizedEvaluations = Array.isArray(evaluations)
+    ? evaluations.map(normalizeEvaluation).filter((value): value is EvaluationItem => Boolean(value))
+    : [];
+
+  return { summary, evaluations: normalizedEvaluations, clusters, ranking, trace };
 }
 
-export default async function Home() {
-  const data = await getData();
+type HomeProps = {
+  searchParams?: Promise<{ run?: string }>;
+};
+
+export default async function Home({ searchParams }: HomeProps) {
+  const resolvedSearchParams = searchParams ? await searchParams : undefined;
+  const runsDesc = await getRuns();
+  const runs = [...runsDesc].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  const latestRunId = runsDesc[0]?.id ?? (await getLatestRunId());
+  const requestedRunId = resolvedSearchParams?.run;
+  const selectedRunId = requestedRunId && runs.some((run) => run.id === requestedRunId) ? requestedRunId : latestRunId;
+  const data = await getData(selectedRunId ?? null);
+
+  const repoName =
+    typeof data.summary?.repo === "string" && data.summary.repo.trim() ? data.summary.repo : "openclaw/openclaw";
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-8">
       <header className="mb-8 rounded-lg border border-[var(--border)] bg-[var(--card)] px-4 py-4">
         <h1 className="text-2xl font-semibold tracking-tight text-neutral-100">RLM Repo Intel</h1>
         <p className="mt-1 text-sm text-neutral-400">
-          Recursive Language Model analysis for <span className="font-mono text-blue-300">openclaw/openclaw</span>
+          Recursive Language Model analysis for <span className="font-mono text-blue-300">{repoName}</span>
         </p>
       </header>
 
       <DashboardClient
+        runs={runs}
+        selectedRunId={selectedRunId ?? null}
         summary={data.summary}
         evaluations={data.evaluations}
         clusters={data.clusters}

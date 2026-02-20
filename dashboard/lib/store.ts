@@ -58,6 +58,7 @@ function getSQL() {
 
 // Auto-create tables on first use
 let initialized = false;
+const RUNS_KEY = "rlm:runs";
 
 async function ensureTables() {
   if (initialized) return;
@@ -102,51 +103,120 @@ async function writeKV(key: string, value: unknown): Promise<void> {
   }
 }
 
-export async function getSummary(): Promise<AnalysisSummary | null> {
-  return readKV("rlm:summary", null);
+export interface RunInfo {
+  id: string;
+  timestamp: string;
 }
 
-export async function setSummary(data: AnalysisSummary) {
+function runKey(runId: string, kind: "summary" | "evaluations" | "clusters" | "ranking" | "agent_trace" | "meta") {
+  return `rlm:run:${runId}:${kind}`;
+}
+
+function toTimestamp(runId: string, fallback: string) {
+  const asNumber = Number(runId);
+  if (Number.isFinite(asNumber)) {
+    return new Date(asNumber).toISOString();
+  }
+  const parsed = new Date(runId);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toISOString();
+  }
+  return fallback;
+}
+
+export function createRunId() {
+  return String(Date.now());
+}
+
+export async function getRunIds(): Promise<string[]> {
+  return readKV(RUNS_KEY, []);
+}
+
+async function ensureRun(runId: string) {
+  const existing = await getRunIds();
+  if (!existing.includes(runId)) {
+    await writeKV(RUNS_KEY, [...existing, runId]);
+  }
+  const currentMeta = await readKV<RunInfo | null>(runKey(runId, "meta"), null);
+  if (!currentMeta) {
+    await writeKV(runKey(runId, "meta"), {
+      id: runId,
+      timestamp: toTimestamp(runId, new Date().toISOString()),
+    } satisfies RunInfo);
+  }
+}
+
+export async function getRuns(): Promise<RunInfo[]> {
+  const runIds = await getRunIds();
+  const runs = await Promise.all(
+    runIds.map(async (id) => {
+      const meta = await readKV<RunInfo | null>(runKey(id, "meta"), null);
+      return (
+        meta ?? {
+          id,
+          timestamp: toTimestamp(id, new Date(0).toISOString()),
+        }
+      );
+    })
+  );
+  return runs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
+
+export async function getLatestRunId(): Promise<string | null> {
+  const runs = await getRuns();
+  return runs[0]?.id ?? null;
+}
+
+export async function getSummary(runId: string): Promise<AnalysisSummary | null> {
+  return readKV(runKey(runId, "summary"), null);
+}
+
+export async function setSummary(runId: string, data: AnalysisSummary) {
+  await ensureRun(runId);
   data.last_updated = new Date().toISOString();
-  await writeKV("rlm:summary", data);
+  await writeKV(runKey(runId, "summary"), data);
 }
 
-export async function getEvaluations(): Promise<PREvaluation[]> {
-  return readKV("rlm:evaluations", []);
+export async function getEvaluations(runId: string): Promise<PREvaluation[]> {
+  return readKV(runKey(runId, "evaluations"), []);
 }
 
-export async function setEvaluations(data: PREvaluation[]) {
-  await writeKV("rlm:evaluations", data);
+export async function setEvaluations(runId: string, data: PREvaluation[]) {
+  await ensureRun(runId);
+  await writeKV(runKey(runId, "evaluations"), data);
 }
 
-export async function appendEvaluation(ev: PREvaluation) {
-  const existing = await getEvaluations();
+export async function appendEvaluation(runId: string, ev: PREvaluation) {
+  const existing = await getEvaluations(runId);
   const idx = existing.findIndex((e) => e.pr_number === ev.pr_number);
   if (idx >= 0) existing[idx] = ev;
   else existing.push(ev);
-  await setEvaluations(existing);
+  await setEvaluations(runId, existing);
 }
 
-export async function getClusters(): Promise<PRCluster[]> {
-  return readKV("rlm:clusters", []);
+export async function getClusters(runId: string): Promise<PRCluster[]> {
+  return readKV(runKey(runId, "clusters"), []);
 }
 
-export async function setClusters(data: PRCluster[]) {
-  await writeKV("rlm:clusters", data);
+export async function setClusters(runId: string, data: PRCluster[]) {
+  await ensureRun(runId);
+  await writeKV(runKey(runId, "clusters"), data);
 }
 
-export async function getRanking(): Promise<Record<string, unknown> | null> {
-  return readKV("rlm:ranking", null);
+export async function getRanking(runId: string): Promise<Record<string, unknown> | null> {
+  return readKV(runKey(runId, "ranking"), null);
 }
 
-export async function setRanking(data: Record<string, unknown>) {
-  await writeKV("rlm:ranking", data);
+export async function setRanking(runId: string, data: Record<string, unknown>) {
+  await ensureRun(runId);
+  await writeKV(runKey(runId, "ranking"), data);
 }
 
-export async function getAgentTrace(): Promise<AgentTraceStep[]> {
-  return readKV("rlm:agent_trace", []);
+export async function getAgentTrace(runId: string): Promise<AgentTraceStep[]> {
+  return readKV(runKey(runId, "agent_trace"), []);
 }
 
-export async function setAgentTrace(data: AgentTraceStep[]) {
-  await writeKV("rlm:agent_trace", data);
+export async function setAgentTrace(runId: string, data: AgentTraceStep[]) {
+  await ensureRun(runId);
+  await writeKV(runKey(runId, "agent_trace"), data);
 }
