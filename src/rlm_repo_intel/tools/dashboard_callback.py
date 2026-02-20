@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from rlm_repo_intel.dashboard_push import push_evaluation, push_summary, push_tr
 _RESULTS_BACKUP_PATH = Path(".rlm-repo-intel/results/live_partial_evaluations.json")
 _SUMMARY_BACKUP_PATH = Path(".rlm-repo-intel/results/live_partial_summary.json")
 _TRACE_BACKUP_PATH = Path(".rlm-repo-intel/results/live_trace_steps.json")
+_LOGGER = logging.getLogger(__name__)
 
 _pushed_pr_numbers: set[int] = set()
 _pushed_fingerprints: set[str] = set()
@@ -69,6 +71,16 @@ def _current_evaluations() -> list[dict[str, Any]]:
     return evaluations
 
 
+def _push_or_log(name: str, fn, *args) -> None:
+    """Execute dashboard push operation and expose failures instead of silent drops."""
+    try:
+        fn(*args)
+    except Exception:
+        _LOGGER.exception("Dashboard push failed for %s", name)
+        if os.getenv("RLM_DASHBOARD_PUSH_STRICT", "").strip().lower() in {"1", "true", "yes", "on"}:
+            raise
+
+
 def _build_partial_summary(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(evaluations)
     state_counts: dict[str, int] = {}
@@ -96,7 +108,7 @@ def _build_partial_summary(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def push_partial_results(results: list[dict[str, Any]]) -> None:
-    """Push incremental PR scoring results to Neon and local backup files."""
+    """Push incremental PR scoring results and local backup files."""
     if not isinstance(results, list):
         return
 
@@ -116,11 +128,7 @@ def push_partial_results(results: list[dict[str, Any]]) -> None:
             _latest_by_pr[pr_number] = normalized
             _pushed_pr_numbers.add(pr_number)
             changed = True
-            if os.getenv("DATABASE_URL"):
-                try:
-                    push_evaluation(normalized)
-                except Exception:
-                    pass
+            _push_or_log("evaluation", push_evaluation, normalized)
             continue
 
         fp = _fingerprint(normalized)
@@ -129,21 +137,13 @@ def push_partial_results(results: list[dict[str, Any]]) -> None:
         _pushed_fingerprints.add(fp)
         _latest_misc[fp] = normalized
         changed = True
-        if os.getenv("DATABASE_URL"):
-            try:
-                push_evaluation(normalized)
-            except Exception:
-                pass
+        _push_or_log("evaluation", push_evaluation, normalized)
 
     evaluations = _current_evaluations()
     summary = _build_partial_summary(evaluations)
 
     # Keep summary fresh even when batch had duplicates so dashboard progress heartbeat updates.
-    if os.getenv("DATABASE_URL"):
-        try:
-            push_summary(summary)
-        except Exception:
-            pass
+    _push_or_log("summary", push_summary, summary)
 
     _ensure_parent(_RESULTS_BACKUP_PATH)
     _RESULTS_BACKUP_PATH.write_text(json.dumps(evaluations, indent=2))
@@ -156,7 +156,7 @@ def push_partial_results(results: list[dict[str, Any]]) -> None:
 
 
 def push_trace_step(iteration: int, type: str, content: str) -> None:
-    """Append a trace step and push the latest full trace to Neon and local backup."""
+    """Append a trace step and push the latest full trace and local backup."""
     try:
         normalized_iteration = int(iteration)
     except (TypeError, ValueError):
@@ -174,11 +174,7 @@ def push_trace_step(iteration: int, type: str, content: str) -> None:
     }
 
     _trace_steps.append(step)
-    if os.getenv("DATABASE_URL"):
-        try:
-            push_trace(_trace_steps)
-        except Exception:
-            pass
+    _push_or_log("trace", push_trace, _trace_steps)
 
     _ensure_parent(_TRACE_BACKUP_PATH)
     _TRACE_BACKUP_PATH.write_text(json.dumps(_trace_steps, indent=2))
