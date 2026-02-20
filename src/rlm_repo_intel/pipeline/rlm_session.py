@@ -41,6 +41,26 @@ def _patch_rlm_litellm_kwargs_passthrough() -> None:
     if getattr(LiteLLMClient, "_rlm_repo_intel_kwargs_passthrough_patch", False):
         return
 
+    def _strip_json_markdown_fences(content: Any) -> Any:
+        if not isinstance(content, str):
+            return content
+
+        text = content.strip()
+        if text.startswith("```json") and text.endswith("```"):
+            body = text[len("```json"):]
+        elif text.startswith("```") and text.endswith("```"):
+            body = text[len("```"):]
+        else:
+            return content
+
+        if body.startswith("\n"):
+            body = body[1:]
+        if body.endswith("\n```"):
+            body = body[:-4]
+        elif body.endswith("```"):
+            body = body[:-3]
+        return body.strip()
+
     def _build_kwargs(
         client: LiteLLMClient, messages: list[dict[str, Any]], model: str
     ) -> dict[str, Any]:
@@ -68,7 +88,7 @@ def _patch_rlm_litellm_kwargs_passthrough() -> None:
 
         response = litellm.completion(**_build_kwargs(client, messages, selected_model))
         client._track_cost(response, selected_model)
-        return response.choices[0].message.content
+        return _strip_json_markdown_fences(response.choices[0].message.content)
 
     async def _acompletion(
         client: LiteLLMClient, prompt: str | list[dict[str, Any]], model: str | None = None
@@ -86,7 +106,7 @@ def _patch_rlm_litellm_kwargs_passthrough() -> None:
 
         response = await litellm.acompletion(**_build_kwargs(client, messages, selected_model))
         client._track_cost(response, selected_model)
-        return response.choices[0].message.content
+        return _strip_json_markdown_fences(response.choices[0].message.content)
 
     LiteLLMClient.completion = _completion
     LiteLLMClient.acompletion = _acompletion
