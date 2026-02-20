@@ -9,6 +9,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from rlm_repo_intel.dashboard_push import (
     push_evaluation,
     push_ranking,
     push_summary,
+    push_trace,
 )
 from rlm_repo_intel.pipeline.rlm_session import create_frontier_rlm
 
@@ -266,20 +268,32 @@ def _build_clusters(evaluations: list[dict[str, Any]]) -> list[dict[str, Any]]:
             add_cluster(f"title:{title_theme}", f"title pattern '{title_theme}'", pr_number)
 
     result: list[dict[str, Any]] = []
+    cluster_id = 1
     for cluster in clusters.values():
         pr_numbers = sorted(cluster["pr_numbers"])
         if len(pr_numbers) < 2:
             continue
+        relations: list[dict[str, Any]] = []
+        for pr_a, pr_b in combinations(pr_numbers, 2):
+            relations.append(
+                {
+                    "pr_a": pr_a,
+                    "pr_b": pr_b,
+                    "relation_type": "related",
+                    "explanation": f"Grouped by {cluster['theme']}",
+                }
+            )
         result.append(
             {
-                "name": cluster["name"],
-                "pr_numbers": pr_numbers,
-                "theme": cluster["theme"],
-                "count": len(pr_numbers),
+                "cluster_id": cluster_id,
+                "members": pr_numbers,
+                "size": len(pr_numbers),
+                "relations": relations,
             }
         )
+        cluster_id += 1
 
-    result.sort(key=lambda item: item["count"], reverse=True)
+    result.sort(key=lambda item: item["size"], reverse=True)
     return result
 
 
@@ -297,22 +311,102 @@ def _build_ranking(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
 
         ranking_items.append(
             {
-                "pr_number": ev.get("pr_number"),
-                "title": ev.get("title"),
+                "pr_number": int(_to_float(ev.get("pr_number"), 0)),
+                "title": str(ev.get("title", "")),
                 "rank_score": rank_score,
-                "urgency": _normalize_score(ev.get("risk_score")),
-                "quality": _normalize_score(ev.get("quality_score")),
-                "state": ev.get("state", "unknown"),
+                "state": str(ev.get("state", "unknown")),
+                "reason": str(ev.get("review_summary", "")).strip(),
             }
         )
 
     ranking_items.sort(key=lambda item: item["rank_score"], reverse=True)
     top_50 = ranking_items[:50]
+    ranking_view: list[dict[str, Any]] = []
+    for index, item in enumerate(top_50, start=1):
+        reason = item["reason"] or f"score={item['rank_score']:.2f}; state={item['state']}"
+        ranking_view.append(
+            {
+                "number": item["pr_number"],
+                "rank": index,
+                "reason": reason,
+                "score": item["rank_score"],
+            }
+        )
+
     return {
-        "ranking": top_50,
+        "ranking": ranking_view,
         "total_evaluated": len(evaluations),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _parse_trace_steps(raw_text: str) -> list[dict[str, Any]]:
+    text = raw_text.strip()
+    if not text:
+        return []
+
+    steps: list[dict[str, Any]] = []
+    current_iteration = 1
+    current_type = "llm_response"
+    buffer: list[str] = []
+    in_code_block = False
+    now = datetime.now(timezone.utc).isoformat()
+
+    marker_re = re.compile(r"^\s*(?:#+\s*)?(?:iteration|iter|step)\s*[:#-]?\s*(\d+)\b", re.IGNORECASE)
+    fence_re = re.compile(r"^\s*```")
+
+    def flush_buffer() -> None:
+        if not buffer:
+            return
+        content = "\n".join(buffer).strip()
+        buffer.clear()
+        if not content:
+            return
+        steps.append(
+            {
+                "iteration": current_iteration,
+                "type": current_type,
+                "content": content,
+                "timestamp": now,
+            }
+        )
+
+    for line in text.splitlines():
+        marker_match = marker_re.match(line)
+        if marker_match and not in_code_block:
+            flush_buffer()
+            current_iteration = int(marker_match.group(1))
+            current_type = "llm_response"
+            continue
+
+        if fence_re.match(line):
+            if in_code_block:
+                buffer.append(line)
+                flush_buffer()
+                in_code_block = False
+                current_type = "llm_response"
+                continue
+            flush_buffer()
+            in_code_block = True
+            current_type = "code_execution"
+            buffer.append(line)
+            continue
+
+        buffer.append(line)
+
+    flush_buffer()
+
+    if not steps:
+        return [
+            {
+                "iteration": 1,
+                "type": "llm_response",
+                "content": text,
+                "timestamp": now,
+            }
+        ]
+
+    return steps
 
 
 def main():
@@ -350,6 +444,7 @@ def main():
 
     print(f"\nResults saved to {output_path}")
     print(f"Agent trace saved to {trace_path}")
+    trace_steps = _parse_trace_steps(response_text)
 
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
@@ -379,6 +474,12 @@ def main():
         )
     except Exception as exc:
         print(f"Dashboard cluster/ranking push failed: {exc}. Local backup is still saved.")
+
+    try:
+        push_trace(trace_steps)
+        print(f"Pushed {len(trace_steps)} agent trace steps to dashboard DB.")
+    except Exception as exc:
+        print(f"Dashboard trace push failed: {exc}. Local backup is still saved.")
 
 
 if __name__ == "__main__":

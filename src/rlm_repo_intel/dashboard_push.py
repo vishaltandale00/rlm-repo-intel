@@ -98,3 +98,36 @@ def push_clusters(data: Any) -> None:
 
 def push_ranking(data: dict[str, Any]) -> None:
     _write_kv("rlm:ranking", data)
+
+
+def push_trace(trace_steps: list[dict[str, Any]]) -> None:
+    normalized: list[dict[str, Any]] = []
+    for step in trace_steps:
+        if not isinstance(step, dict):
+            continue
+
+        step_type = str(step.get("type", "llm_response"))
+        if step_type not in {"llm_response", "code_execution"}:
+            step_type = "llm_response"
+
+        iteration = step.get("iteration", 1)
+        try:
+            iteration = int(iteration)
+        except (TypeError, ValueError):
+            iteration = 1
+
+        timestamp = step.get("timestamp")
+        if not isinstance(timestamp, str) or not timestamp.strip():
+            timestamp = datetime.now(timezone.utc).isoformat()
+
+        content = step.get("content", "")
+        normalized.append(
+            {
+                "iteration": iteration,
+                "type": step_type,
+                "content": str(content),
+                "timestamp": timestamp,
+            }
+        )
+
+    _write_kv("rlm:agent_trace", normalized)
