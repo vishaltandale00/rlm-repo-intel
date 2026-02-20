@@ -1,13 +1,4 @@
-/**
- * Simple in-memory + file-backed store for analysis results.
- * In production, replace with a database. For now, the local Python pipeline
- * pushes JSON to the /api/push endpoint and we serve it back.
- */
-
-import { readFile, writeFile, mkdir } from "fs/promises";
-import { join } from "path";
-
-const DATA_DIR = process.env.DATA_DIR || ".data";
+import { kv } from "@vercel/kv";
 
 export interface AnalysisSummary {
   repo?: string;
@@ -47,41 +38,51 @@ export interface PRCluster {
   }>;
 }
 
-async function ensureDir() {
-  try {
-    await mkdir(DATA_DIR, { recursive: true });
-  } catch {}
+const KV_KEYS = {
+  summary: "rlm:summary",
+  evaluations: "rlm:evaluations",
+  clusters: "rlm:clusters",
+  ranking: "rlm:ranking",
+};
+
+function hasKVConfig() {
+  return Boolean(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
 }
 
-async function readJSON<T>(filename: string, fallback: T): Promise<T> {
+async function readKV<T>(key: string, fallback: T): Promise<T> {
+  if (!hasKVConfig()) return fallback;
   try {
-    const data = await readFile(join(DATA_DIR, filename), "utf-8");
-    return JSON.parse(data);
+    const value = await kv.get<T>(key);
+    return value ?? fallback;
   } catch {
     return fallback;
   }
 }
 
-async function writeJSON(filename: string, data: unknown) {
-  await ensureDir();
-  await writeFile(join(DATA_DIR, filename), JSON.stringify(data, null, 2));
+async function writeKV(key: string, value: unknown): Promise<void> {
+  if (!hasKVConfig()) return;
+  try {
+    await kv.set(key, value);
+  } catch {
+    // no-op: graceful fallback when KV is unavailable
+  }
 }
 
 export async function getSummary(): Promise<AnalysisSummary | null> {
-  return readJSON("summary.json", null);
+  return readKV(KV_KEYS.summary, null);
 }
 
 export async function setSummary(data: AnalysisSummary) {
   data.last_updated = new Date().toISOString();
-  await writeJSON("summary.json", data);
+  await writeKV(KV_KEYS.summary, data);
 }
 
 export async function getEvaluations(): Promise<PREvaluation[]> {
-  return readJSON("evaluations.json", []);
+  return readKV(KV_KEYS.evaluations, []);
 }
 
 export async function setEvaluations(data: PREvaluation[]) {
-  await writeJSON("evaluations.json", data);
+  await writeKV(KV_KEYS.evaluations, data);
 }
 
 export async function appendEvaluation(ev: PREvaluation) {
@@ -94,17 +95,17 @@ export async function appendEvaluation(ev: PREvaluation) {
 }
 
 export async function getClusters(): Promise<PRCluster[]> {
-  return readJSON("clusters.json", []);
+  return readKV(KV_KEYS.clusters, []);
 }
 
 export async function setClusters(data: PRCluster[]) {
-  await writeJSON("clusters.json", data);
+  await writeKV(KV_KEYS.clusters, data);
 }
 
 export async function getRanking(): Promise<Record<string, unknown> | null> {
-  return readJSON("ranking.json", null);
+  return readKV(KV_KEYS.ranking, null);
 }
 
 export async function setRanking(data: Record<string, unknown>) {
-  await writeJSON("ranking.json", data);
+  await writeKV(KV_KEYS.ranking, data);
 }
