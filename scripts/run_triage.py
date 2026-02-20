@@ -17,13 +17,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from rlm_repo_intel.config import load_config
 from rlm_repo_intel.dashboard_push import (
+    push_run_event,
+    push_run_meta,
     push_clusters,
     push_evaluation,
     push_ranking,
     push_summary,
     push_trace,
+    start_new_run,
 )
 from rlm_repo_intel.pipeline.rlm_session import create_frontier_rlm
+from rlm_repo_intel.prompts.prompt_registry import get_prompt_version
+from rlm_repo_intel.prompts.root_prompts import TRIAGE_TASK_PROMPT
 
 
 def _extract_response_text(result: Any) -> str:
@@ -562,30 +567,52 @@ def _parse_trace_steps(raw_text: str) -> list[dict[str, Any]]:
 
 def main():
     config = load_config("rlm-repo-intel.yaml")
-    print("Creating frontier RLM...")
-    rlm = create_frontier_rlm(config)
+    start_time = datetime.now(timezone.utc)
+    local_run_id = start_time.strftime("%Y%m%dT%H%M%S%fZ")
+    prompt_version = get_prompt_version()
+    prompt_hash = str(prompt_version.get("hash", "unknown"))
+    model_name = "anthropic/claude-sonnet-4-20250514"
+    budget = float(config.get("pipeline", {}).get("max_budget", 2000.0))
 
-    prompt = (
-        "Execute a strict 4-phase PR triage pipeline with anti-shortcut enforcement. "
-        "Phase 1 metadata only: get all open PRs, compute an interest score using changedFiles, additions+deletions, "
-        "security or fix or breaking title terms, label count, and touches to auth or gateway or config or agents or security paths; "
-        "sort descending, take top 300, and store as candidates. "
-        "Phase 2 deep analysis: only for those 300 candidates, read each PR diff and changed files with repo context, assess behavior changes, tests, and break risks, "
-        "write unique justification paragraphs with specific file references, and score urgency, quality, criticality, risk_if_merged as floats. "
-        "Summarizing diffs is acceptable but for each changed file you must explore its connections in the codebase. "
-        "For each changed file, use repo to trace who imports it, what modules call into it, what config references it, and what breaks if it changes. "
-        "Cross-module dependencies are the highest risk and most valuable insight. "
-        "Your analysis should demonstrate you explored BEYOND the diff to understand ripple effects across the codebase. "
-        "When a PR touches a core module like auth, gateway, config, or agents, grep the repo dict for all files that import or reference that module and assess downstream impact. "
-        "Evidence must include at least one cross-module dependency reference showing you traced the impact chain. "
-        "For Phase 2, you MUST analyze each PR individually. Do NOT write a loop function that scores PRs in bulk. Instead, take batches of 10-20 PRs at a time, "
-        "read each diff, reference specific files from the repo dict, and write unique justifications. If any PR has a generic justification without specific file references, the entire run is invalid. "
-        "After each Phase 2 batch, call push_partial_results(scored_prs_list). "
-        "Phase 3 scoring calibration: compute final_score = 0.35*urgency + 0.30*quality + 0.20*criticality + 0.15*(10 - risk_if_merged), "
-        "force distribution so no more than 15 percent score above 9.0, then sort descending. "
-        "Phase 4 elite curation: keep top 100-150 PRs with final_score >= 9.0, raise threshold if more than 150 pass. "
-        "Store full results in triage_results, elite list in top_prs, and summary in triage_summary."
-    )
+    run_metadata: dict[str, Any] = {
+        "id": local_run_id,
+        "status": "running",
+        "kind": "experimental",
+        "prompt_version": prompt_hash,
+        "prompt_hash": prompt_hash,
+        "prompt_label": prompt_hash[:12],
+        "prompt_source_paths": [
+            "src/rlm_repo_intel/prompts/root_prompts.py",
+            "scripts/run_triage.py",
+        ],
+        "prompt_bundle": prompt_version.get("bundle", {}),
+        "model_root": model_name,
+        "model_name": model_name,
+        "config_snapshot": config,
+        "start_time": start_time.isoformat(),
+        "started_at": start_time.isoformat(),
+        "budget": budget,
+        "token_input": 0,
+        "token_output": 0,
+        "cost_usd": 0.0,
+        "total_prs_seen": 0,
+        "total_prs_scored": 0,
+    }
+
+    database_url = os.getenv("DATABASE_URL")
+    run_id = local_run_id
+    if database_url:
+        try:
+            run_id = start_new_run(run_metadata, run_id=local_run_id)
+            run_metadata["id"] = run_id
+            push_run_meta(run_metadata, run_id=run_id)
+            print(f"Initialized run: {run_id} (prompt={prompt_hash[:12]})")
+        except Exception as exc:
+            print(f"Failed to initialize run on dashboard: {exc}. Continuing with local run ID {run_id}.")
+
+    print("Creating frontier RLM...")
+    rlm = create_frontier_rlm(config, run_id=run_id)
+    prompt = TRIAGE_TASK_PROMPT
 
     print(f"Running RLM with prompt: {prompt}")
     print("=" * 80)
@@ -652,7 +679,6 @@ def main():
     print(f"Agent trace saved to {trace_path}")
     trace_steps = _parse_trace_steps(response_text)
 
-    database_url = os.getenv("DATABASE_URL")
     if not database_url:
         print("DATABASE_URL not set, skipping dashboard push.")
         return
@@ -668,8 +694,8 @@ def main():
 
     try:
         for evaluation in evaluations:
-            push_evaluation(evaluation)
-        push_summary(summary)
+            push_evaluation(evaluation, run_id=run_id)
+        push_summary(summary, run_id=run_id)
         print(f"Pushed {len(evaluations)} evaluations and summary to dashboard DB.")
     except Exception as exc:
         print(f"Dashboard push failed: {exc}. Local backup is still saved.")
@@ -678,8 +704,8 @@ def main():
     ranking = _build_ranking_from_top_prs(top_prs_raw) if top_prs_raw else _build_ranking(evaluations)
 
     try:
-        push_clusters(clusters)
-        push_ranking(ranking)
+        push_clusters(clusters, run_id=run_id)
+        push_ranking(ranking, run_id=run_id)
         print(
             f"Pushed {len(clusters)} clusters and {len(ranking.get('ranking', []))} ranked PRs to dashboard DB."
         )
@@ -687,10 +713,28 @@ def main():
         print(f"Dashboard cluster/ranking push failed: {exc}. Local backup is still saved.")
 
     try:
-        push_trace(trace_steps)
+        push_trace(trace_steps, run_id=run_id)
         print(f"Pushed {len(trace_steps)} agent trace steps to dashboard DB.")
     except Exception as exc:
         print(f"Dashboard trace push failed: {exc}. Local backup is still saved.")
+
+    end_time = datetime.now(timezone.utc)
+    elapsed_seconds = max(0.0, (end_time - start_time).total_seconds())
+    run_metadata.update(
+        {
+            "status": "completed",
+            "end_time": end_time.isoformat(),
+            "ended_at": end_time.isoformat(),
+            "time_elapsed_seconds": round(elapsed_seconds, 2),
+            "total_prs_seen": len(evaluations_raw),
+            "total_prs_scored": len(evaluations),
+        }
+    )
+    try:
+        push_run_meta(run_metadata, run_id=run_id)
+        push_run_event({"event": "completed", "ended_at": end_time.isoformat()}, run_id=run_id)
+    except Exception as exc:
+        print(f"Dashboard run-finalization push failed: {exc}.")
 
 
 if __name__ == "__main__":

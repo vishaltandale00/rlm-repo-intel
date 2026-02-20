@@ -9,6 +9,7 @@ import {
   ClusterItem,
   EvaluationItem,
   RankingData,
+  RunMeta,
   SummaryData,
 } from "@/components/types";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -22,6 +23,7 @@ interface RunTab {
 interface DashboardClientProps {
   runs: RunTab[];
   selectedRunId: string | null;
+  selectedRunMeta: RunMeta | null;
   summary: SummaryData | null;
   evaluations: EvaluationItem[];
   clusters: ClusterItem[];
@@ -41,6 +43,17 @@ function formatRunLabel(run: RunTab, index: number) {
     ? run.id
     : date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   return `Run ${index + 1} - ${dateLabel}`;
+}
+
+function formatElapsed(runMeta: RunMeta | null): string {
+  if (!runMeta) return "n/a";
+  if (typeof runMeta.time_elapsed_seconds === "number") return `${runMeta.time_elapsed_seconds.toFixed(1)}s`;
+  const start = runMeta.started_at ?? runMeta.start_time ?? runMeta.timestamp;
+  const end = runMeta.ended_at ?? runMeta.end_time;
+  const startDate = new Date(start);
+  const endDate = end ? new Date(end) : new Date();
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return "n/a";
+  return `${Math.max(0, (endDate.getTime() - startDate.getTime()) / 1000).toFixed(1)}s`;
 }
 
 function RunSelector({ runs, selectedRunId }: { runs: RunTab[]; selectedRunId: string | null }) {
@@ -104,7 +117,16 @@ function RunSelector({ runs, selectedRunId }: { runs: RunTab[]; selectedRunId: s
   );
 }
 
-export function DashboardClient({ runs, selectedRunId, summary, evaluations, clusters, ranking, trace }: DashboardClientProps) {
+export function DashboardClient({
+  runs,
+  selectedRunId,
+  selectedRunMeta,
+  summary,
+  evaluations,
+  clusters,
+  ranking,
+  trace,
+}: DashboardClientProps) {
   const router = useRouter();
   const firstTracePR = useMemo(
     () =>
@@ -133,7 +155,72 @@ export function DashboardClient({ runs, selectedRunId, summary, evaluations, clu
     <div className="grid gap-6">
       <RunSelector runs={runs} selectedRunId={selectedRunId} />
 
+      <section className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-4 py-3">
+        <div className="grid gap-3 text-xs md:grid-cols-4">
+          <div>
+            <div className="text-neutral-500 uppercase tracking-wide">Run ID</div>
+            <div className="font-mono text-neutral-200">{selectedRunId ?? "none"}</div>
+          </div>
+          <div>
+            <div className="text-neutral-500 uppercase tracking-wide">Prompt Version</div>
+            <div className="font-mono text-blue-300">{selectedRunMeta?.prompt_hash?.slice(0, 12) ?? "n/a"}</div>
+          </div>
+          <div>
+            <div className="text-neutral-500 uppercase tracking-wide">Model</div>
+            <div className="font-mono text-neutral-200">
+              {selectedRunMeta?.model_name ?? selectedRunMeta?.model_root ?? "n/a"}
+            </div>
+          </div>
+          <div>
+            <div className="text-neutral-500 uppercase tracking-wide">Start Time</div>
+            <div className="font-mono text-neutral-200">
+              {selectedRunMeta?.started_at
+                ? new Date(selectedRunMeta.started_at).toLocaleString()
+                : selectedRunMeta?.timestamp
+                  ? new Date(selectedRunMeta.timestamp).toLocaleString()
+                  : "n/a"}
+            </div>
+          </div>
+        </div>
+      </section>
+
       <LiveStatusBar summary={summary} evaluatedCount={evaluations.length} />
+
+      <section className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-4 py-3">
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-neutral-300">Run Info</h2>
+        <div className="grid gap-3 text-xs md:grid-cols-3">
+          <div>
+            <div className="text-neutral-500 uppercase tracking-wide">Prompt Hash</div>
+            <div className="font-mono text-neutral-200">{selectedRunMeta?.prompt_hash ?? "n/a"}</div>
+          </div>
+          <div>
+            <div className="text-neutral-500 uppercase tracking-wide">Model</div>
+            <div className="font-mono text-neutral-200">
+              {selectedRunMeta?.model_name ?? selectedRunMeta?.model_root ?? "n/a"}
+            </div>
+          </div>
+          <div>
+            <div className="text-neutral-500 uppercase tracking-wide">Tokens Used</div>
+            <div className="font-mono text-neutral-200">
+              {(selectedRunMeta?.token_input ?? 0) + (selectedRunMeta?.token_output ?? 0)}
+            </div>
+          </div>
+          <div>
+            <div className="text-neutral-500 uppercase tracking-wide">Time Elapsed</div>
+            <div className="font-mono text-neutral-200">{formatElapsed(selectedRunMeta)}</div>
+          </div>
+          <div>
+            <div className="text-neutral-500 uppercase tracking-wide">PRs Analyzed</div>
+            <div className="font-mono text-neutral-200">
+              {selectedRunMeta?.total_prs_scored ?? selectedRunMeta?.total_prs_seen ?? evaluations.length}
+            </div>
+          </div>
+          <div>
+            <div className="text-neutral-500 uppercase tracking-wide">Cost</div>
+            <div className="font-mono text-neutral-200">${(selectedRunMeta?.cost_usd ?? 0).toFixed(2)}</div>
+          </div>
+        </div>
+      </section>
 
       <Summary data={summary} />
 

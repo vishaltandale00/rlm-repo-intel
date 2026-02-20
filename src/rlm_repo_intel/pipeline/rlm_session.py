@@ -7,7 +7,12 @@ from typing import Any
 from rlm import RLM
 
 from rlm_repo_intel.prompts.root_prompts import ROOT_FRONTIER_PROMPT
-from rlm_repo_intel.tools.dashboard_callback import push_partial_results, push_trace_step
+from rlm_repo_intel.tools.dashboard_callback import (
+    push_partial_results,
+    push_trace_step,
+    reset_run_state,
+    set_run_context,
+)
 from rlm_repo_intel.tools.repo_loader import (
     build_issue_table,
     build_pr_table,
@@ -19,7 +24,7 @@ from rlm_repo_intel.tools.repo_loader import (
 from rlm_repo_intel.tools.search_tools import git_blame, git_log, web_search
 
 
-def create_frontier_rlm(config: dict[str, Any]) -> RLM:
+def create_frontier_rlm(config: dict[str, Any], run_id: str | None = None) -> RLM:
     # Load everything into memory
     repo = load_repo_to_repl(config)
     repo_tree = build_repo_tree(repo)
@@ -33,6 +38,9 @@ def create_frontier_rlm(config: dict[str, Any]) -> RLM:
     # Also precompute summary tables as REPL vars so the model can print() them
     pr_table = build_pr_table(prs)
     issue_table = build_issue_table(issues)
+
+    set_run_context(run_id)
+    reset_run_state()
 
     custom_tools = {
         "repo": repo,

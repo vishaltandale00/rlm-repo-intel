@@ -6,6 +6,7 @@ import {
   getEvaluations,
   getLatestRunId,
   getRanking,
+  getRunMeta,
   getRuns,
   getSummary,
 } from "@/lib/store";
@@ -80,19 +81,20 @@ function normalizeEvaluation(raw: unknown): EvaluationItem | null {
 }
 
 async function getData(selectedRunId: string | null) {
-  const [summary, evaluations, clusters, ranking, trace] = await Promise.all([
+  const [summary, evaluations, clusters, ranking, trace, runMeta] = await Promise.all([
     getSummary(selectedRunId),
     getEvaluations(selectedRunId),
     getClusters(selectedRunId),
     getRanking(selectedRunId),
     getAgentTrace(selectedRunId),
+    selectedRunId ? getRunMeta(selectedRunId) : Promise.resolve(null),
   ]);
 
   const normalizedEvaluations = Array.isArray(evaluations)
     ? evaluations.map(normalizeEvaluation).filter((value): value is EvaluationItem => Boolean(value))
     : [];
 
-  return { summary, evaluations: normalizedEvaluations, clusters, ranking, trace };
+  return { summary, evaluations: normalizedEvaluations, clusters, ranking, trace, runMeta };
 }
 
 type HomeProps = {
@@ -123,6 +125,7 @@ export default async function Home({ searchParams }: HomeProps) {
       <DashboardClient
         runs={runs}
         selectedRunId={selectedRunId ?? null}
+        selectedRunMeta={data.runMeta}
         summary={data.summary}
         evaluations={data.evaluations}
         clusters={data.clusters}

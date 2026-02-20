@@ -75,3 +75,26 @@ export interface AgentTraceStep {
   content: string;
   timestamp: string;
 }
+
+export interface RunMeta {
+  id: string;
+  timestamp: string;
+  status?: "running" | "completed" | "failed" | "archived";
+  kind?: "baseline" | "experimental" | "ab_control" | "ab_treatment";
+  prompt_version?: string;
+  prompt_hash?: string;
+  prompt_label?: string;
+  model_name?: string;
+  model_root?: string;
+  budget?: number;
+  start_time?: string;
+  started_at?: string;
+  end_time?: string;
+  ended_at?: string;
+  time_elapsed_seconds?: number;
+  token_input?: number;
+  token_output?: number;
+  cost_usd?: number;
+  total_prs_seen?: number;
+  total_prs_scored?: number;
+}

@@ -12,11 +12,14 @@ import {
   setAgentTrace,
   getOrCreateCurrentRunId,
   startNewCurrentRun,
+  setRunMeta,
+  appendRunEvent,
+  setPromptBundle,
 } from "@/lib/store";
 
 /**
  * Push endpoint — the local Python pipeline POSTs results here.
- * Accepts: { run_id?: string, type: "new_run"|"summary"|"evaluation"|"evaluations_batch"|"clusters"|"ranking"|"trace", data: ... }
+ * Accepts: { run_id?: string, type: "new_run"|"run_meta"|"run_event"|"summary"|"evaluation"|"evaluations_batch"|"clusters"|"ranking"|"trace", data: ... }
  * Protected by PUSH_SECRET env var.
  */
 export async function POST(req: NextRequest) {
@@ -34,7 +37,11 @@ export async function POST(req: NextRequest) {
 
   switch (type) {
     case "new_run": {
-      const newRunId = await startNewCurrentRun();
+      const meta = data && typeof data === "object" ? data : {};
+      const newRunId = await startNewCurrentRun(meta, explicitRunId ?? undefined);
+      if (meta && typeof meta === "object" && meta.prompt_bundle && typeof meta.prompt_bundle === "object") {
+        await setPromptBundle(newRunId, meta.prompt_bundle as Record<string, unknown>);
+      }
       return NextResponse.json({ ok: true, type: "new_run", run_id: newRunId });
     }
 
@@ -46,6 +53,19 @@ export async function POST(req: NextRequest) {
   const mirrorToLegacy = !explicitRunId;
 
   switch (type) {
+    case "run_meta":
+      await setRunMeta(runId, data ?? {});
+      if (data?.prompt_bundle && typeof data.prompt_bundle === "object") {
+        await setPromptBundle(runId, data.prompt_bundle as Record<string, unknown>);
+      }
+      return NextResponse.json({ ok: true, type: "run_meta", run_id: runId });
+
+    case "run_event":
+      if (!data || typeof data !== "object" || typeof data.event !== "string") {
+        return NextResponse.json({ error: "invalid run_event payload" }, { status: 400 });
+      }
+      await appendRunEvent(runId, data as { event: string; [key: string]: unknown });
+      return NextResponse.json({ ok: true, type: "run_event", run_id: runId });
 
     case "summary":
       await setSummary(runId, data);

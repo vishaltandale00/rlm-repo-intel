@@ -121,18 +121,47 @@ async function deleteKV(key: string): Promise<void> {
   }
 }
 
-export interface RunInfo {
+export interface RunMeta {
   id: string;
   timestamp: string;
+  status?: "running" | "completed" | "failed" | "archived";
+  kind?: "baseline" | "experimental" | "ab_control" | "ab_treatment";
+  prompt_version?: string;
+  prompt_hash?: string;
+  prompt_label?: string;
+  prompt_source_paths?: string[];
+  model_name?: string;
+  model_root?: string;
+  model_workers?: Record<string, string>;
+  config_snapshot?: Record<string, unknown>;
+  budget?: number;
+  start_time?: string;
+  started_at?: string;
+  end_time?: string;
+  ended_at?: string;
+  time_elapsed_seconds?: number;
+  token_input?: number;
+  token_output?: number;
+  cost_usd?: number;
+  total_prs_seen?: number;
+  total_prs_scored?: number;
+  prompt_bundle?: Record<string, unknown>;
 }
 
-type DataKind = "summary" | "evaluations" | "clusters" | "ranking" | "agent_trace" | "meta";
+export type RunInfo = RunMeta;
+
+export interface RunEvent {
+  event: string;
+  [key: string]: unknown;
+}
+
+type DataKind = "summary" | "evaluations" | "clusters" | "ranking" | "agent_trace" | "meta" | "prompt_bundle";
 
 function runKey(runId: string, kind: DataKind) {
   return `rlm:run:${runId}:${kind}`;
 }
 
-function legacyKey(kind: Exclude<DataKind, "meta">) {
+function legacyKey(kind: "summary" | "evaluations" | "clusters" | "ranking" | "agent_trace") {
   switch (kind) {
     case "summary":
       return LEGACY_SUMMARY_KEY;
@@ -210,12 +239,13 @@ async function ensureRun(runId: string) {
   if (!existing.includes(runId)) {
     await writeKV(RUNS_KEY, [...existing, runId]);
   }
-  const currentMeta = await readKV<RunInfo | null>(runKey(runId, "meta"), null);
+  const currentMeta = await readKV<RunMeta | null>(runKey(runId, "meta"), null);
   if (!currentMeta) {
     await writeKV(runKey(runId, "meta"), {
       id: runId,
       timestamp: toTimestamp(runId, new Date().toISOString()),
-    } satisfies RunInfo);
+      status: "running",
+    } satisfies RunMeta);
   }
 }
 
@@ -237,18 +267,21 @@ export async function getOrCreateCurrentRunId(): Promise<string> {
   return runId;
 }
 
-export async function startNewCurrentRun(): Promise<string> {
-  const runId = createRunId();
+export async function startNewCurrentRun(initialMeta?: Partial<RunMeta>, preferredRunId?: string): Promise<string> {
+  const runId = preferredRunId && preferredRunId.trim() ? preferredRunId.trim() : createRunId();
   await ensureRun(runId);
+  if (initialMeta && Object.keys(initialMeta).length > 0) {
+    await setRunMeta(runId, { ...initialMeta, id: runId });
+  }
   await writeKV(CURRENT_RUN_ID_KEY, runId);
   return runId;
 }
 
-export async function getRuns(): Promise<RunInfo[]> {
+export async function getRuns(): Promise<RunMeta[]> {
   const runIds = await getRunIds();
   const runs = await Promise.all(
     runIds.map(async (id) => {
-      const meta = await readKV<RunInfo | null>(runKey(id, "meta"), null);
+      const meta = await readKV<RunMeta | null>(runKey(id, "meta"), null);
       return (
         meta ?? {
           id,
@@ -279,6 +312,53 @@ export async function getSummary(runId?: string | null): Promise<AnalysisSummary
   if (isLegacyScope(runId)) return readKV(legacyKey("summary"), null);
   const scopedRunId = runId as string;
   return readKV(runKey(scopedRunId, "summary"), null);
+}
+
+export async function getRunMeta(runId: string): Promise<RunMeta | null> {
+  if (!runId || isLegacyScope(runId)) {
+    return readKV<RunMeta | null>(runKey(LEGACY_RUN_ID, "meta"), null);
+  }
+  return readKV<RunMeta | null>(runKey(runId, "meta"), null);
+}
+
+export async function setRunMeta(runId: string, data: Partial<RunMeta>) {
+  await ensureRun(runId);
+  const existing = await readKV<RunMeta | null>(runKey(runId, "meta"), null);
+  const merged: RunMeta = {
+    ...(existing ?? {
+      id: runId,
+      timestamp: toTimestamp(runId, new Date().toISOString()),
+    }),
+    ...data,
+    id: runId,
+    timestamp: data.timestamp ?? existing?.timestamp ?? toTimestamp(runId, new Date().toISOString()),
+  };
+  await writeKV(runKey(runId, "meta"), merged);
+}
+
+export async function appendRunEvent(runId: string, event: RunEvent) {
+  const existing = await getRunMeta(runId);
+  const updated: Partial<RunMeta> = {};
+  if (event.event === "completed") {
+    updated.status = "completed";
+    if (typeof event.ended_at === "string") updated.ended_at = event.ended_at;
+  } else if (event.event === "failed") {
+    updated.status = "failed";
+    if (typeof event.ended_at === "string") updated.ended_at = event.ended_at;
+  }
+  if (Object.keys(updated).length > 0) {
+    await setRunMeta(runId, { ...existing, ...updated });
+  }
+}
+
+export async function getPromptBundle(runId: string): Promise<Record<string, unknown> | null> {
+  if (!runId || isLegacyScope(runId)) return null;
+  return readKV<Record<string, unknown> | null>(runKey(runId, "prompt_bundle"), null);
+}
+
+export async function setPromptBundle(runId: string, bundle: Record<string, unknown>) {
+  await ensureRun(runId);
+  await writeKV(runKey(runId, "prompt_bundle"), bundle);
 }
 
 export async function setSummary(runId: string, data: AnalysisSummary) {
@@ -388,6 +468,7 @@ async function deleteRun(runId: string) {
   } else {
     await Promise.all([
       deleteKV(runKey(runId, "meta")),
+      deleteKV(runKey(runId, "prompt_bundle")),
       deleteKV(runKey(runId, "summary")),
       deleteKV(runKey(runId, "evaluations")),
       deleteKV(runKey(runId, "clusters")),

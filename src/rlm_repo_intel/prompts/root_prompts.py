@@ -99,6 +99,23 @@ Execution behavior
 {custom_tools_section}
 """.strip()
 
+TRIAGE_TASK_PROMPT = """
+Execute a strict 4-phase PR triage pipeline with anti-shortcut enforcement.
+Phase 1 metadata only: get all open PRs, compute an interest score using changedFiles, additions+deletions, security or fix or breaking title terms, label count, and touches to auth or gateway or config or agents or security paths; sort descending, take top 300, and store as candidates.
+Phase 2 deep analysis: only for those 300 candidates, read each PR diff and changed files with repo context, assess behavior changes, tests, and break risks, write unique justification paragraphs with specific file references, and score urgency, quality, criticality, risk_if_merged as floats.
+Summarizing diffs is acceptable but for each changed file you must explore its connections in the codebase.
+For each changed file, use repo to trace who imports it, what modules call into it, what config references it, and what breaks if it changes.
+Cross-module dependencies are the highest risk and most valuable insight.
+Your analysis should demonstrate you explored BEYOND the diff to understand ripple effects across the codebase.
+When a PR touches a core module like auth, gateway, config, or agents, grep the repo dict for all files that import or reference that module and assess downstream impact.
+Evidence must include at least one cross-module dependency reference showing you traced the impact chain.
+For Phase 2, you MUST analyze each PR individually. Do NOT write a loop function that scores PRs in bulk. Instead, take batches of 10-20 PRs at a time, read each diff, reference specific files from the repo dict, and write unique justifications. If any PR has a generic justification without specific file references, the entire run is invalid.
+After each Phase 2 batch, call push_partial_results(scored_prs_list).
+Phase 3 scoring calibration: compute final_score = 0.35*urgency + 0.30*quality + 0.20*criticality + 0.15*(10 - risk_if_merged), force distribution so no more than 15 percent score above 9.0, then sort descending.
+Phase 4 elite curation: keep top 100-150 PRs with final_score >= 9.0, raise threshold if more than 150 pass.
+Store full results in triage_results, elite list in top_prs, and summary in triage_summary.
+""".strip()
+
 CODE_ANALYST = """
 You are a Senior Code Analyst.
 Goal: explain actual behavior from evidence only.

@@ -19,6 +19,24 @@ _pushed_fingerprints: set[str] = set()
 _latest_by_pr: dict[int, dict[str, Any]] = {}
 _latest_misc: dict[str, dict[str, Any]] = {}
 _trace_steps: list[dict[str, Any]] = []
+_active_run_id: str | None = None
+
+
+def set_run_context(run_id: str | None) -> None:
+    global _active_run_id
+    _active_run_id = run_id.strip() if isinstance(run_id, str) and run_id.strip() else None
+
+
+def get_run_context() -> str | None:
+    return _active_run_id
+
+
+def reset_run_state() -> None:
+    _pushed_pr_numbers.clear()
+    _pushed_fingerprints.clear()
+    _latest_by_pr.clear()
+    _latest_misc.clear()
+    _trace_steps.clear()
 
 
 def _ensure_parent(path: Path) -> None:
@@ -128,7 +146,7 @@ def push_partial_results(results: list[dict[str, Any]]) -> None:
             _latest_by_pr[pr_number] = normalized
             _pushed_pr_numbers.add(pr_number)
             changed = True
-            _push_or_log("evaluation", push_evaluation, normalized)
+            _push_or_log("evaluation", push_evaluation, normalized, _active_run_id)
             continue
 
         fp = _fingerprint(normalized)
@@ -137,13 +155,13 @@ def push_partial_results(results: list[dict[str, Any]]) -> None:
         _pushed_fingerprints.add(fp)
         _latest_misc[fp] = normalized
         changed = True
-        _push_or_log("evaluation", push_evaluation, normalized)
+        _push_or_log("evaluation", push_evaluation, normalized, _active_run_id)
 
     evaluations = _current_evaluations()
     summary = _build_partial_summary(evaluations)
 
     # Keep summary fresh even when batch had duplicates so dashboard progress heartbeat updates.
-    _push_or_log("summary", push_summary, summary)
+    _push_or_log("summary", push_summary, summary, _active_run_id)
 
     _ensure_parent(_RESULTS_BACKUP_PATH)
     _RESULTS_BACKUP_PATH.write_text(json.dumps(evaluations, indent=2))
@@ -174,7 +192,7 @@ def push_trace_step(iteration: int, type: str, content: str) -> None:
     }
 
     _trace_steps.append(step)
-    _push_or_log("trace", push_trace, _trace_steps)
+    _push_or_log("trace", push_trace, _trace_steps, _active_run_id)
 
     _ensure_parent(_TRACE_BACKUP_PATH)
     _TRACE_BACKUP_PATH.write_text(json.dumps(_trace_steps, indent=2))
