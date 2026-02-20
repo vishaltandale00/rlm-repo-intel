@@ -55,6 +55,7 @@ class GraphStore:
 
     def save(self):
         """Persist graph to disk."""
+        self.graph_dir.mkdir(parents=True, exist_ok=True)
         data = {
             "nodes": [{"id": n.id, "type": n.type, **n.data} for n in self.nodes.values()],
             "edges": [{"source": e.source, "target": e.target, "type": e.type, **e.data} for e in self.edges],

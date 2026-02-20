@@ -4,6 +4,7 @@ import json
 import re
 from pathlib import Path
 from dataclasses import dataclass, asdict
+from typing import Any
 
 from rich.console import Console
 from rich.progress import Progress
@@ -37,6 +38,7 @@ def evaluate_all_prs(config: dict, limit: int | None = None):
 
     data_dir = Path(config["paths"]["data_dir"])
     results_dir = Path(config["paths"]["results_dir"])
+    results_dir.mkdir(parents=True, exist_ok=True)
 
     # Load graph with module cards
     graph = GraphStore(config["paths"]["graph_dir"])
@@ -46,23 +48,34 @@ def evaluate_all_prs(config: dict, limit: int | None = None):
     arch_path = results_dir / "architecture.json"
     architecture = {}
     if arch_path.exists():
-        with open(arch_path) as f:
-            architecture = json.load(f)
+        try:
+            with open(arch_path) as f:
+                architecture = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            console.print(f"[yellow]Warning: failed to load architecture model: {exc}[/]")
 
     # Load module cards
     cards_path = results_dir / "module_cards.json"
     module_cards = {}
     if cards_path.exists():
-        with open(cards_path) as f:
-            module_cards = json.load(f)
+        try:
+            with open(cards_path) as f:
+                module_cards = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            console.print(f"[yellow]Warning: failed to load module cards: {exc}[/]")
 
     # Load PRs
     prs_path = data_dir / "prs" / "all_prs.jsonl"
     prs = []
     if prs_path.exists():
         with open(prs_path) as f:
-            for line in f:
-                prs.append(json.loads(line))
+            for line_number, line in enumerate(f, start=1):
+                try:
+                    prs.append(json.loads(line))
+                except json.JSONDecodeError:
+                    console.print(
+                        f"[yellow]Warning: skipping malformed PR JSONL row {line_number}[/]"
+                    )
 
     if limit:
         prs = prs[:limit]
@@ -74,15 +87,27 @@ def evaluate_all_prs(config: dict, limit: int | None = None):
     issues_by_number = {}
     if issues_path.exists():
         with open(issues_path) as f:
-            for line in f:
-                issue = json.loads(line)
-                issues_by_number[issue["number"]] = issue
+            for line_number, line in enumerate(f, start=1):
+                try:
+                    issue = json.loads(line)
+                except json.JSONDecodeError:
+                    console.print(
+                        f"[yellow]Warning: skipping malformed issue JSONL row {line_number}[/]"
+                    )
+                    continue
+                issue_num = issue.get("number")
+                if isinstance(issue_num, int):
+                    issues_by_number[issue_num] = issue
 
     # Configure worker RLM
-    worker = RLM(
-        backend="openai",
-        backend_kwargs={"model_name": config["models"]["cheap_worker"]},
-    )
+    worker = None
+    try:
+        worker = RLM(
+            backend=_infer_backend(config["models"]["cheap_worker"]),
+            backend_kwargs={"model_name": config["models"]["cheap_worker"]},
+        )
+    except Exception as exc:
+        console.print(f"[yellow]Warning: failed to initialize RLM worker: {exc}[/]")
 
     evaluations = []
 
@@ -90,14 +115,36 @@ def evaluate_all_prs(config: dict, limit: int | None = None):
         task = progress.add_task("Evaluating PRs...", total=len(prs))
 
         for pr in prs:
-            eval_result = _evaluate_single_pr(
-                pr=pr,
-                graph=graph,
-                module_cards=module_cards,
-                architecture=architecture,
-                issues=issues_by_number,
-                worker=worker,
-            )
+            try:
+                eval_result = _evaluate_single_pr(
+                    pr=pr,
+                    graph=graph,
+                    module_cards=module_cards,
+                    architecture=architecture,
+                    issues=issues_by_number,
+                    worker=worker,
+                )
+            except Exception as exc:
+                pr_number = int(pr.get("number", 0))
+                title = str(pr.get("title") or "(untitled PR)")
+                console.print(
+                    f"[yellow]Warning: evaluation failed for PR #{pr_number}: {exc}[/]"
+                )
+                eval_result = PREvaluation(
+                    pr_number=pr_number,
+                    title=title,
+                    impact_scope=[],
+                    risk_score=0.5,
+                    quality_score=0.5,
+                    strategic_value=0.5,
+                    novelty_score=0.5,
+                    test_alignment=0.5,
+                    linked_issues=[],
+                    conflict_candidates=[],
+                    redundancy_candidates=[],
+                    review_summary="Evaluation failed; requires manual review.",
+                    confidence=0.2,
+                )
             evaluations.append(eval_result)
             progress.update(task, advance=1)
 
@@ -144,11 +191,15 @@ def _evaluate_single_pr(
     linked_issues = extract_issue_refs(pr.get("body", "") or "")
 
     # Step 4: Build prompt with codebase intelligence
+    pr_number = int(pr.get("number", 0))
+    pr_title = str(pr.get("title") or "(untitled PR)")
+    pr_state = str(pr.get("state") or "unknown")
+
     prompt = f"""Evaluate this GitHub PR against the codebase understanding.
 
-PR #{pr['number']}: {pr['title']}
+PR #{pr_number}: {pr_title}
 Author: {pr.get('author', {}).get('login', 'unknown')}
-State: {pr['state']}
+State: {pr_state}
 +{pr.get('additions', 0)} -{pr.get('deletions', 0)}, {pr.get('changedFiles', 0)} files changed
 
 Description:
@@ -174,27 +225,30 @@ Also provide:
 
 Return as JSON."""
 
-    result = worker.completion(prompt)
-
-    try:
-        parsed = _parse_json_response(result.response)
-    except Exception:
-        parsed = {}
+    parsed = {}
+    if worker is not None:
+        try:
+            result = worker.completion(prompt)
+            parsed = _parse_json_response(_extract_completion_text(result))
+        except Exception as exc:
+            console.print(
+                f"[yellow]Warning: RLM evaluation failed for PR #{pr.get('number')}: {exc}[/]"
+            )
 
     ev = PREvaluation(
-        pr_number=pr["number"],
-        title=pr["title"],
+        pr_number=int(pr.get("number", 0)),
+        title=str(pr.get("title") or "(untitled PR)"),
         impact_scope=touched_modules,
-        risk_score=parsed.get("risk_score", 0.5),
-        quality_score=parsed.get("quality_score", 0.5),
-        strategic_value=parsed.get("strategic_value", 0.5),
-        novelty_score=parsed.get("novelty_score", 0.5),
-        test_alignment=parsed.get("test_alignment", 0.5),
+        risk_score=_safe_score(parsed.get("risk_score"), default=0.5),
+        quality_score=_safe_score(parsed.get("quality_score"), default=0.5),
+        strategic_value=_safe_score(parsed.get("strategic_value"), default=0.5),
+        novelty_score=_safe_score(parsed.get("novelty_score"), default=0.5),
+        test_alignment=_safe_score(parsed.get("test_alignment"), default=0.5),
         linked_issues=linked_issues,
-        conflict_candidates=parsed.get("conflict_candidates", []),
-        redundancy_candidates=parsed.get("redundancy_candidates", []),
-        review_summary=parsed.get("review_summary", ""),
-        confidence=parsed.get("confidence", 0.5),
+        conflict_candidates=_safe_int_list(parsed.get("conflict_candidates")),
+        redundancy_candidates=_safe_int_list(parsed.get("redundancy_candidates")),
+        review_summary=str(parsed.get("review_summary") or ""),
+        confidence=_safe_score(parsed.get("confidence"), default=0.5),
     )
 
     # Compute composite rank score
@@ -258,6 +312,47 @@ def _parse_json_response(response: str) -> dict:
     """Parse JSON from response, handling markdown."""
     text = response.strip()
     if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:-1])
+        text = _strip_markdown_fence(text)
     return json.loads(text)
+
+
+def _strip_markdown_fence(text: str) -> str:
+    lines = text.splitlines()
+    if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return text
+
+
+def _extract_completion_text(result: Any) -> str:
+    if hasattr(result, "response"):
+        return str(getattr(result, "response"))
+    return str(result)
+
+
+def _safe_score(value: Any, default: float) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, score))
+
+
+def _safe_int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    cleaned = []
+    for item in value:
+        try:
+            cleaned.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return cleaned
+
+
+def _infer_backend(model_name: str) -> str:
+    model = model_name.lower()
+    if model.startswith("claude"):
+        return "anthropic"
+    if model.startswith("gemini"):
+        return "gemini"
+    return "openai"

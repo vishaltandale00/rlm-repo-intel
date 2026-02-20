@@ -80,10 +80,12 @@ def build_structural_graph(repo_dir: Path, config: dict) -> dict:
         })
 
     # Add contains edges (module -> file)
+    module_paths = sorted(modules.keys(), key=len, reverse=True)
     for f in files:
         rel_path = str(f.relative_to(repo_dir))
-        for mod_path in modules:
-            if rel_path.startswith(mod_path):
+        for mod_path in module_paths:
+            mod_prefix = f"{mod_path}/"
+            if rel_path == mod_path or rel_path.startswith(mod_prefix):
                 graph["edges"].append({
                     "source": f"module:{mod_path}",
                     "target": f"file:{rel_path}",
@@ -108,7 +110,7 @@ def build_structural_graph(repo_dir: Path, config: dict) -> dict:
     stats = {
         "files": len(files),
         "modules": len(modules),
-        "import_edges": len(imports),
+        "import_edges": sum(len(imported) for imported in imports.values()),
         "total_bytes": sum(f.stat().st_size for f in files),
     }
     with open(graph_dir / "stats.json", "w") as f:
@@ -193,7 +195,7 @@ def _extract_imports(files: list[Path], repo_dir: Path) -> dict[str, list[str]]:
             for match in ts_import_re.finditer(content):
                 imported = match.group(1)
                 # Resolve relative import to absolute path
-                resolved = _resolve_ts_import(rel_path, imported)
+                resolved = _resolve_ts_import(rel_path, imported, file_set)
                 if resolved and resolved in file_set:
                     found.add(resolved)
 
@@ -211,20 +213,25 @@ def _extract_imports(files: list[Path], repo_dir: Path) -> dict[str, list[str]]:
     return imports
 
 
-def _resolve_ts_import(source_path: str, import_path: str) -> str | None:
+def _resolve_ts_import(source_path: str, import_path: str, file_set: set[str]) -> str | None:
     """Resolve a relative TypeScript/JS import to a file path."""
     if not import_path.startswith("."):
         return None
 
     source_dir = str(Path(source_path).parent)
-    resolved = str(Path(source_dir) / import_path)
+    resolved = Path(source_dir) / import_path
 
-    # Try common extensions
-    for ext in [".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js"]:
-        candidate = resolved + ext
-        # Normalize path
-        candidate = str(Path(candidate))
-        return candidate  # Return first candidate; graph builder checks existence
+    candidates = [str(resolved)]
+    if resolved.suffix == "":
+        # Try common extensions and index file conventions.
+        for ext in [".ts", ".tsx", ".js", ".jsx"]:
+            candidates.append(str(Path(str(resolved) + ext)))
+        for index_name in ["/index.ts", "/index.tsx", "/index.js", "/index.jsx"]:
+            candidates.append(str(Path(str(resolved) + index_name)))
+
+    for candidate in candidates:
+        if candidate in file_set:
+            return candidate
 
     return None
 

@@ -4,10 +4,9 @@ import json
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from collections import defaultdict
+from typing import Any
 
 from rich.console import Console
-
-from ..graph.store import GraphStore
 
 console = Console()
 
@@ -26,14 +25,20 @@ def run_synthesis(config: dict, top_n: int = 200):
     from rlm import RLM
 
     results_dir = Path(config["paths"]["results_dir"])
+    results_dir.mkdir(parents=True, exist_ok=True)
 
     # Load PR evaluations
     evals = []
     eval_path = results_dir / "pr_evaluations.jsonl"
     if eval_path.exists():
         with open(eval_path) as f:
-            for line in f:
-                evals.append(json.loads(line))
+            for line_number, line in enumerate(f, start=1):
+                try:
+                    evals.append(json.loads(line))
+                except json.JSONDecodeError:
+                    console.print(
+                        f"[yellow]Warning: skipping malformed evaluation JSONL row {line_number}[/]"
+                    )
 
     console.print(f"\n[bold]Cross-PR synthesis over {len(evals)} evaluations...[/]")
 
@@ -44,10 +49,14 @@ def run_synthesis(config: dict, top_n: int = 200):
 
     # Step 2: Adjudicate pairs with RLM
     console.print("  Adjudicating pairs...")
-    worker = RLM(
-        backend="openai",
-        backend_kwargs={"model_name": config["models"]["cheap_worker"]},
-    )
+    worker = None
+    try:
+        worker = RLM(
+            backend=_infer_backend(config["models"]["cheap_worker"]),
+            backend_kwargs={"model_name": config["models"]["cheap_worker"]},
+        )
+    except Exception as exc:
+        console.print(f"[yellow]Warning: failed to initialize synthesis worker: {exc}[/]")
     relations = _adjudicate_pairs(candidates, evals, worker)
     console.print(f"  → {len(relations)} relations found")
 
@@ -56,10 +65,14 @@ def run_synthesis(config: dict, top_n: int = 200):
 
     # Step 4: Final ranking with root model
     console.print("  Computing final ranking...")
-    root = RLM(
-        backend="anthropic",
-        backend_kwargs={"model_name": config["models"]["root"]},
-    )
+    root = None
+    try:
+        root = RLM(
+            backend=_infer_backend(config["models"]["root"]),
+            backend_kwargs={"model_name": config["models"]["root"]},
+        )
+    except Exception as exc:
+        console.print(f"[yellow]Warning: failed to initialize synthesis root model: {exc}[/]")
     ranking = _final_ranking(evals, relations, clusters, root, top_n)
 
     # Save everything
@@ -87,13 +100,16 @@ def _generate_candidates(evals: list[dict], config: dict) -> list[tuple[int, int
     - Similar issue references
     - Title/description text similarity (would use embeddings in production)
     """
-    max_candidates = config["limits"]["pair_candidates_max"]
+    max_candidates = config.get("limits", {}).get("pair_candidates_max", 15_000)
 
     # Group by touched module
     module_to_prs = defaultdict(list)
     for ev in evals:
+        pr_number = ev.get("pr_number")
+        if not isinstance(pr_number, int):
+            continue
         for mod in ev.get("impact_scope", []):
-            module_to_prs[mod].append(ev["pr_number"])
+            module_to_prs[mod].append(pr_number)
 
     # Generate pairs from same-module groups
     candidates = set()
@@ -108,8 +124,11 @@ def _generate_candidates(evals: list[dict], config: dict) -> list[tuple[int, int
     # Also pair PRs that reference the same issues
     issue_to_prs = defaultdict(list)
     for ev in evals:
+        pr_number = ev.get("pr_number")
+        if not isinstance(pr_number, int):
+            continue
         for issue_num in ev.get("linked_issues", []):
-            issue_to_prs[issue_num].append(ev["pr_number"])
+            issue_to_prs[issue_num].append(pr_number)
 
     for issue, pr_ids in issue_to_prs.items():
         for i, a in enumerate(pr_ids):
@@ -128,7 +147,12 @@ def _adjudicate_pairs(
     worker,
 ) -> list[PRPairRelation]:
     """Use RLM worker to determine relationship between PR pairs."""
-    evals_by_number = {ev["pr_number"]: ev for ev in evals}
+    if worker is None:
+        return []
+
+    evals_by_number = {
+        ev["pr_number"]: ev for ev in evals if isinstance(ev.get("pr_number"), int)
+    }
     relations = []
 
     for pr_a, pr_b in candidates:
@@ -156,19 +180,27 @@ Classify as one of:
 
 Return JSON: {{"relation": "...", "confidence": 0.0-1.0, "explanation": "..."}}"""
 
-        result = worker.completion(prompt)
         try:
-            parsed = json.loads(result.response.strip().strip("`").strip())
-            if parsed.get("relation") != "unrelated":
-                relations.append(PRPairRelation(
-                    pr_a=pr_a,
-                    pr_b=pr_b,
-                    relation_type=parsed["relation"],
-                    confidence=parsed.get("confidence", 0.5),
-                    explanation=parsed.get("explanation", ""),
-                ))
-        except Exception:
+            result = worker.completion(prompt)
+            parsed = _parse_json_response(_extract_completion_text(result))
+        except Exception as exc:
+            console.print(
+                f"[yellow]Warning: failed to adjudicate PR pair ({pr_a}, {pr_b}): {exc}[/]"
+            )
             continue
+
+        relation = parsed.get("relation")
+        if relation not in {"redundant", "alternative", "conflicting", "composable", "unrelated"}:
+            continue
+        if relation == "unrelated":
+            continue
+        relations.append(PRPairRelation(
+            pr_a=pr_a,
+            pr_b=pr_b,
+            relation_type=relation,
+            confidence=_safe_score(parsed.get("confidence"), default=0.5),
+            explanation=str(parsed.get("explanation", "")),
+        ))
 
     return relations
 
@@ -210,7 +242,7 @@ def _build_clusters(relations: list[PRPairRelation]) -> list[dict]:
         if len(members) > 1:
             cluster_relations = [
                 asdict(r) for r in relations
-                if r.pr_a in members or r.pr_b in members
+                if r.pr_a in members and r.pr_b in members
             ]
             clusters.append({
                 "cluster_id": root,
@@ -270,9 +302,44 @@ Return JSON with:
 - themes: top 5 themes/areas these PRs address
 """
 
-    result = root_rlm.completion(prompt)
+    if root_rlm is None:
+        return {"pre_ranking": [e["pr_number"] for e in sorted_evals[:top_n]]}
 
     try:
-        return json.loads(result.response.strip().strip("`").strip())
-    except Exception:
-        return {"raw": result.response, "pre_ranking": [e["pr_number"] for e in sorted_evals[:top_n]]}
+        result = root_rlm.completion(prompt)
+        return _parse_json_response(_extract_completion_text(result))
+    except Exception as exc:
+        console.print(f"[yellow]Warning: final ranking failed: {exc}[/]")
+        return {"pre_ranking": [e["pr_number"] for e in sorted_evals[:top_n]]}
+
+
+def _parse_json_response(response: str) -> dict:
+    text = response.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].strip() == "```":
+            text = "\n".join(lines[1:-1]).strip()
+    return json.loads(text)
+
+
+def _extract_completion_text(result: Any) -> str:
+    if hasattr(result, "response"):
+        return str(getattr(result, "response"))
+    return str(result)
+
+
+def _safe_score(value: Any, default: float) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, score))
+
+
+def _infer_backend(model_name: str) -> str:
+    model = model_name.lower()
+    if model.startswith("claude"):
+        return "anthropic"
+    if model.startswith("gemini"):
+        return "gemini"
+    return "openai"

@@ -31,7 +31,14 @@ def export_results(config: dict, fmt: str, output_dir: str, push_url: str | None
             if path.suffix == ".jsonl":
                 # Convert JSONL to JSON array for export
                 with open(path) as f:
-                    items = [json.loads(line) for line in f]
+                    items = []
+                    for line_number, line in enumerate(f, start=1):
+                        try:
+                            items.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            console.print(
+                                f"  [yellow]Skipping malformed JSONL row {line_number} in {path.name}[/]"
+                            )
                 with open(out / f"{name}.json", "w") as f:
                     json.dump(items, f, indent=2)
             else:
@@ -66,15 +73,16 @@ def _build_summary(results_dir: Path) -> dict:
     # Module cards
     cards_path = results_dir / "module_cards.json"
     if cards_path.exists():
-        with open(cards_path) as f:
-            cards = json.load(f)
-        summary["total_modules"] = len(cards)
+        cards = _safe_load_json(cards_path)
+        if isinstance(cards, dict):
+            summary["total_modules"] = len(cards)
+        elif isinstance(cards, list):
+            summary["total_modules"] = len(cards)
 
     # Final ranking
     ranking_path = results_dir / "final_ranking.json"
     if ranking_path.exists():
-        with open(ranking_path) as f:
-            ranking = json.load(f)
+        ranking = _safe_load_json(ranking_path)
         summary["top_prs"] = ranking.get("ranking", [])[:20]
         summary["themes"] = ranking.get("themes", [])
 
@@ -82,14 +90,21 @@ def _build_summary(results_dir: Path) -> dict:
     eval_path = results_dir / "pr_evaluations.jsonl"
     if eval_path.exists():
         with open(eval_path) as f:
-            summary["total_prs_evaluated"] = sum(1 for _ in f)
+            total = 0
+            for line in f:
+                try:
+                    json.loads(line)
+                    total += 1
+                except json.JSONDecodeError:
+                    continue
+            summary["total_prs_evaluated"] = total
 
     # Clusters
     clusters_path = results_dir / "pr_clusters.json"
     if clusters_path.exists():
-        with open(clusters_path) as f:
-            clusters = json.load(f)
-        summary["clusters"] = len(clusters)
+        clusters = _safe_load_json(clusters_path)
+        if isinstance(clusters, list):
+            summary["clusters"] = len(clusters)
 
     return summary
 
@@ -143,3 +158,14 @@ def _score_to_priority(score: float) -> str:
     elif score >= 0.3:
         return "medium"
     return "low"
+
+
+def _safe_load_json(path: Path) -> dict | list:
+    try:
+        with open(path) as f:
+            loaded = json.load(f)
+        if isinstance(loaded, (dict, list)):
+            return loaded
+    except (OSError, json.JSONDecodeError) as exc:
+        console.print(f"  [yellow]Skipping malformed JSON file {path.name}: {exc}[/]")
+    return {}

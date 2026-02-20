@@ -11,6 +11,7 @@ This is the core of the system. The RLM:
 import json
 from pathlib import Path
 from dataclasses import dataclass
+from typing import Any
 
 from rich.console import Console
 
@@ -40,26 +41,39 @@ def build_codebase_model(config: dict):
     from rlm import RLM
 
     graph = GraphStore(config["paths"]["graph_dir"])
-    graph.load()
+    try:
+        graph.load()
+    except Exception as exc:
+        console.print(f"[red]Failed to load graph: {exc}[/]")
+        return
 
     modules = graph.get_by_type("module")
     console.print(f"\n[bold]Building codebase model for {len(modules)} modules...[/]")
 
     # Configure RLM instances
-    root_rlm = RLM(
-        backend="anthropic",
-        backend_kwargs={"model_name": config["models"]["root"]},
-        verbose=True,
-    )
-    worker_rlm = RLM(
-        backend="openai",
-        backend_kwargs={"model_name": config["models"]["cheap_worker"]},
-    )
+    root_model = config["models"]["root"]
+    worker_model = config["models"]["cheap_worker"]
+
+    root_rlm = None
+    worker_rlm = None
+    try:
+        root_rlm = RLM(
+            backend=_infer_backend(root_model),
+            backend_kwargs={"model_name": root_model},
+            verbose=True,
+        )
+    except Exception as exc:
+        console.print(f"[yellow]Warning: failed to initialize root RLM: {exc}[/]")
+    try:
+        worker_rlm = RLM(
+            backend=_infer_backend(worker_model),
+            backend_kwargs={"model_name": worker_model},
+        )
+    except Exception as exc:
+        console.print(f"[yellow]Warning: failed to initialize worker RLM: {exc}[/]")
 
     # Phase A: Analyze each module recursively
     module_cards = {}
-    budget = _compute_budget(config, "phase1")
-
     for mod in modules:
         console.print(f"\n  Analyzing [cyan]{mod.id}[/]...")
         card = _analyze_module(
@@ -158,22 +172,15 @@ If the module is very large (>{max_tokens} tokens), write code to split it into
 logical sub-groups and analyze each with sub_rlm calls, then synthesize."""
 
     # Use RLM completion
-    result = worker_rlm.completion(prompt)
-
-    # Parse the response (in production, use structured output)
-    try:
-        parsed = _parse_module_response(result.response)
-    except Exception:
-        parsed = {
-            "summary": f"Module at {module_path} with {len(files)} files",
-            "purpose": "unknown",
-            "contracts": [],
-            "invariants": [],
-            "risks": ["analysis failed — needs manual review"],
-            "key_files": [f.data.get("path", "") for f in files[:5]],
-            "dependencies": [],
-            "confidence": 0.3,
-        }
+    parsed = _module_fallback(module_path, files)
+    if worker_rlm is not None:
+        try:
+            result = worker_rlm.completion(prompt)
+            parsed = _parse_module_response(_extract_completion_text(result))
+        except Exception as exc:
+            console.print(
+                f"[yellow]Warning: module analysis failed for {module.id}: {exc}[/]"
+            )
 
     card = ModuleCard(
         module_id=module.id,
@@ -185,7 +192,7 @@ logical sub-groups and analyze each with sub_rlm calls, then synthesize."""
         key_files=parsed.get("key_files", []),
         dependencies=parsed.get("dependencies", []),
         dependents=[],
-        confidence=parsed.get("confidence", 0.5),
+        confidence=_safe_score(parsed.get("confidence"), default=0.5),
     )
 
     # Recurse if needed
@@ -219,20 +226,22 @@ Produce a JSON architecture model with:
 - health_summary: overall codebase health assessment
 """
 
-    result = root_rlm.completion(prompt)
+    if root_rlm is None:
+        return {"module_count": len(module_cards), "health_summary": "Root model unavailable."}
 
     try:
-        return json.loads(result.response)
-    except Exception:
-        return {"raw_analysis": result.response}
+        result = root_rlm.completion(prompt)
+        return json.loads(_extract_completion_text(result))
+    except Exception as exc:
+        console.print(f"[yellow]Warning: architecture synthesis failed: {exc}[/]")
+        return {"module_count": len(module_cards), "health_summary": "Synthesis failed."}
 
 
 def _parse_module_response(response: str) -> dict:
     """Parse JSON from RLM response, handling markdown code blocks."""
     text = response.strip()
     if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:-1])
+        text = _strip_markdown_fence(text)
     return json.loads(text)
 
 
@@ -257,3 +266,46 @@ def _compute_budget(config: dict, phase: str) -> float:
     pct_key = f"{phase}_pct"
     pct = config["budget"].get(pct_key, 33) / 100
     return total * pct
+
+
+def _strip_markdown_fence(text: str) -> str:
+    lines = text.splitlines()
+    if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return text
+
+
+def _extract_completion_text(result: Any) -> str:
+    if hasattr(result, "response"):
+        return str(getattr(result, "response"))
+    return str(result)
+
+
+def _module_fallback(module_path: str, files: list[Any]) -> dict:
+    return {
+        "summary": f"Module at {module_path} with {len(files)} files",
+        "purpose": "unknown",
+        "contracts": [],
+        "invariants": [],
+        "risks": ["analysis failed — needs manual review"],
+        "key_files": [f.data.get("path", "") for f in files[:5]],
+        "dependencies": [],
+        "confidence": 0.3,
+    }
+
+
+def _safe_score(value: Any, default: float) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, score))
+
+
+def _infer_backend(model_name: str) -> str:
+    model = model_name.lower()
+    if model.startswith("claude"):
+        return "anthropic"
+    if model.startswith("gemini"):
+        return "gemini"
+    return "openai"
