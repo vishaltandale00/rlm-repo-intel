@@ -16,7 +16,7 @@ def main():
     print("Creating frontier RLM...")
     rlm = create_frontier_rlm(config)
     
-    prompt = "Analyze the first 5 open PRs only (use list_prs(state='open', limit=5)). Score each for urgency and quality, assign a state, and produce the full triage JSON. This is a test run — keep it to exactly 5 PRs."
+    prompt = "Analyze the first 5 open PRs. Filter prs for state=='open', take the first 5. Score each for urgency and quality, assign a state, and produce the full triage JSON. This is a test run — keep it to exactly 5 PRs."
     
     print(f"Running RLM with prompt: {prompt}")
     print("=" * 80)

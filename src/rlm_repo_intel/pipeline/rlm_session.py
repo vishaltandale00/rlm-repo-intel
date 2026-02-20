@@ -22,20 +22,25 @@ def create_frontier_rlm(config: dict[str, Any]) -> RLM:
     prs = load_prs(config)
     issues = load_issues(config)
 
-    # Build summary tables for the prompt
+    # All data goes into REPL variables — no tools needed except llm_query/rlm_query
+    # Also precompute summary tables as REPL vars so the model can print() them
     pr_table = build_pr_table(prs)
     issue_table = build_issue_table(issues)
 
-    # All data goes into REPL variables — no tools needed except llm_query/rlm_query
     custom_tools = {
         "repo": repo,
         "repo_tree": repo_tree,
         "prs": prs,
         "issues": issues,
+        "pr_table": pr_table,
+        "issue_table": issue_table,
     }
 
-    # Append tables to system prompt so the LLM sees them immediately
-    prompt_with_tables = f"{ROOT_FRONTIER_PROMPT}\n\n{pr_table}\n\n{issue_table}"
+    # Keep prompt small — just counts + instructions. Tables are in REPL vars.
+    open_prs = len([p for p in prs if p.get("state") == "open"])
+    open_issues = len([i for i in issues if i.get("state") == "open"])
+    stats = f"Data loaded: {len(repo)} files, {open_prs} open PRs ({len(prs)} total), {open_issues} open issues ({len(issues)} total). Use `pr_table` and `issue_table` REPL vars for quick scanning."
+    prompt_with_tables = ROOT_FRONTIER_PROMPT + "\n\n" + stats
 
     return RLM(
         backend="litellm",
