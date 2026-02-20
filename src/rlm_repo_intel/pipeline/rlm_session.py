@@ -4,10 +4,11 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-# Patch rlms library's stale context limit for Sonnet 4 (actual: 1M, library thinks: 128k)
+import litellm
+from rlm.clients.litellm import LiteLLMClient
 from rlm.utils.token_utils import MODEL_CONTEXT_LIMITS
-MODEL_CONTEXT_LIMITS["claude-sonnet-4"] = 1_000_000
-MODEL_CONTEXT_LIMITS["claude-sonnet-4-20250514"] = 1_000_000
+
+# Patch rlms context limit used by compaction logic.
 MODEL_CONTEXT_LIMITS["claude-sonnet-4-6"] = 1_000_000
 
 from rlm import RLM
@@ -28,6 +29,71 @@ from rlm_repo_intel.tools.repo_loader import (
     load_repo_to_repl,
 )
 from rlm_repo_intel.tools.search_tools import git_blame, git_log, web_search
+
+
+def _patch_rlm_litellm_kwargs_passthrough() -> None:
+    """
+    Ensure backend_kwargs (e.g. extra_headers) reach litellm.completion().
+
+    rlms 0.1.1 stores unknown backend kwargs on BaseLM.kwargs but does not
+    forward them in LiteLLMClient completion calls.
+    """
+    if getattr(LiteLLMClient, "_rlm_repo_intel_kwargs_passthrough_patch", False):
+        return
+
+    def _build_kwargs(
+        client: LiteLLMClient, messages: list[dict[str, Any]], model: str
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"model": model, "messages": messages, "timeout": client.timeout}
+        if client.api_key:
+            kwargs["api_key"] = client.api_key
+        if client.api_base:
+            kwargs["api_base"] = client.api_base
+        kwargs.update(client.kwargs)
+        return kwargs
+
+    def _completion(
+        client: LiteLLMClient, prompt: str | list[dict[str, Any]], model: str | None = None
+    ) -> str:
+        if isinstance(prompt, str):
+            messages = [{"role": "user", "content": prompt}]
+        elif isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):
+            messages = prompt
+        else:
+            raise ValueError(f"Invalid prompt type: {type(prompt)}")
+
+        selected_model = model or client.model_name
+        if not selected_model:
+            raise ValueError("Model name is required for LiteLLM client.")
+
+        response = litellm.completion(**_build_kwargs(client, messages, selected_model))
+        client._track_cost(response, selected_model)
+        return response.choices[0].message.content
+
+    async def _acompletion(
+        client: LiteLLMClient, prompt: str | list[dict[str, Any]], model: str | None = None
+    ) -> str:
+        if isinstance(prompt, str):
+            messages = [{"role": "user", "content": prompt}]
+        elif isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):
+            messages = prompt
+        else:
+            raise ValueError(f"Invalid prompt type: {type(prompt)}")
+
+        selected_model = model or client.model_name
+        if not selected_model:
+            raise ValueError("Model name is required for LiteLLM client.")
+
+        response = await litellm.acompletion(**_build_kwargs(client, messages, selected_model))
+        client._track_cost(response, selected_model)
+        return response.choices[0].message.content
+
+    LiteLLMClient.completion = _completion
+    LiteLLMClient.acompletion = _acompletion
+    LiteLLMClient._rlm_repo_intel_kwargs_passthrough_patch = True
+
+
+_patch_rlm_litellm_kwargs_passthrough()
 
 
 def create_frontier_rlm(config: dict[str, Any], run_id: str | None = None) -> RLM:
@@ -66,7 +132,10 @@ def create_frontier_rlm(config: dict[str, Any], run_id: str | None = None) -> RL
 
     return RLM(
         backend="litellm",
-        backend_kwargs={"model_name": "anthropic/claude-sonnet-4-6"},
+        backend_kwargs={
+            "model_name": "anthropic/claude-sonnet-4-6",
+            "extra_headers": {"anthropic-beta": "context-1m-2025-08-07"},
+        },
         custom_system_prompt=prompt_with_tables,
         custom_tools=custom_tools,
         custom_sub_tools={},  # sub-agents get no tools, just llm_query

@@ -1,5 +1,38 @@
 # Context Overflow Analysis
 
+## Sonnet 4.6 1M Extended Context API Investigation (2026-02-20)
+
+Summary of direct checks run in this repo environment:
+
+1. Anthropic Python SDK support:
+- `anthropic.Anthropic().messages.create` has no explicit extended-context parameter.
+- `anthropic.Anthropic().beta.messages.create` includes `betas: List[AnthropicBetaParam]`.
+- Installed SDK types include `model="claude-sonnet-4-6"` in `ModelParam` (`.venv/lib/python3.14/site-packages/anthropic/types/model_param.py`).
+- Installed SDK beta enum includes `"context-1m-2025-08-07"` (`.venv/lib/python3.14/site-packages/anthropic/types/anthropic_beta_param.py`).
+
+2. Model string + larger `max_tokens` behavior:
+- Local SDK validation does not treat larger `max_tokens` as an “extended context” toggle.
+- A non-streaming call with `max_tokens=64000` raises local SDK `ValueError` requiring streaming for long operations (`.venv/lib/python3.14/site-packages/anthropic/_base_client.py:733`).
+- Because outbound API connectivity is blocked in this environment, endpoint-side acceptance could not be confirmed live.
+
+3. LiteLLM mapping / alias handling:
+- `litellm.model_cost` contains no `sonnet-4-6` entries (only prior Sonnet variants, e.g. `claude-sonnet-4-20250514`, `claude-sonnet-4-5`).
+- `litellm.utils.get_model_info(...)` fails for:
+  - `claude-sonnet-4-6`
+  - `claude-sonnet-4-6[1m]`
+  - `anthropic/claude-sonnet-4-6`
+  - `anthropic/claude-sonnet-4-6[1m]`
+- This confirms no built-in `[1m]` alias mapping in this LiteLLM install.
+
+4. Anthropic beta header/path for 1M:
+- LiteLLM ships a beta-header config that explicitly includes `"context-1m-2025-08-07"` for Anthropic (`.venv/lib/python3.14/site-packages/litellm/anthropic_beta_headers_config.json`).
+- LiteLLM has dedicated filtering/forwarding logic for `anthropic-beta` headers (`.venv/lib/python3.14/site-packages/litellm/anthropic_beta_headers_manager.py`).
+- Anthropic SDK also allows direct request headers via `extra_headers` and beta API calls via `client.beta.messages.create(..., betas=[...])`.
+
+5. Live API test requested:
+- Attempted calls to `client.messages.create(model=\"claude-sonnet-4-6\", ...)`, `model=\"claude-sonnet-4-6[1m]\"`, header-based beta, and `client.beta.messages.create(..., betas=[\"context-1m-2025-08-07\"])`.
+- All networked calls failed with `APIConnectionError: Connection error.` in this environment, so live endpoint behavior could not be validated here.
+
 ## Incident
 
 Crash:
