@@ -4,6 +4,11 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+# Patch rlms library's stale context limit for Sonnet 4 (actual: 1M, library thinks: 128k)
+from rlm.utils.token_utils import MODEL_CONTEXT_LIMITS
+MODEL_CONTEXT_LIMITS["claude-sonnet-4"] = 1_000_000
+MODEL_CONTEXT_LIMITS["claude-sonnet-4-20250514"] = 1_000_000
+
 from rlm import RLM
 
 from rlm_repo_intel.prompts.root_prompts import ROOT_FRONTIER_PROMPT
@@ -60,7 +65,7 @@ def create_frontier_rlm(config: dict[str, Any], run_id: str | None = None) -> RL
 
     return RLM(
         backend="litellm",
-        backend_kwargs={"model_name": "gemini/gemini-2.5-pro"},
+        backend_kwargs={"model_name": "anthropic/claude-sonnet-4-20250514"},
         custom_system_prompt=prompt_with_tables,
         custom_tools=custom_tools,
         custom_sub_tools={},  # sub-agents get no tools, just llm_query
