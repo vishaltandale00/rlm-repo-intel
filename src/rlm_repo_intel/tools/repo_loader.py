@@ -20,11 +20,11 @@ def load_repo_to_repl(config: dict[str, Any]) -> dict[str, str]:
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
         for filename in sorted(filenames):
             file_path = Path(root) / filename
-            if _is_binary_file(file_path):
-                continue
             try:
+                if _is_binary_file(file_path):
+                    continue
                 content = file_path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
+            except (UnicodeDecodeError, FileNotFoundError, OSError):
                 continue
             rel_path = file_path.relative_to(repo_root).as_posix()
             repo[rel_path] = content
