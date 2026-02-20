@@ -55,7 +55,11 @@ related clusters, conflicting changes, and dependency chains.
 - Produce a final ranked list.
 
 Output requirements
-- Assign all final results to `FINAL_VAR` as a JSON list sorted by urgency descending.
+- Assign all final results to `triage_results` as a JSON list sorted by urgency descending.
+- After scoring each batch of PRs, call `push_partial_results(scored_prs_list)` to send
+  results to the live dashboard immediately. Do not wait until the end.
+- After each major step, call `push_trace_step(iteration, type, content)` to push
+  an incremental agent trace step.
 - Do not skip evidence. Do not rely on shallow heuristics.
 - Prioritize correctness over speed. This review influences software used at large scale.
 

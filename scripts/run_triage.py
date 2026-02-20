@@ -56,30 +56,36 @@ def _looks_like_triage_payload(value: Any) -> bool:
     return bool(required & first_keys)
 
 
-def _extract_final_var_from_repl(rlm: Any) -> Any | None:
+def _extract_triage_results_from_repl(rlm: Any) -> Any | None:
     env = getattr(rlm, "_persistent_env", None)
-    locals_ns = getattr(env, "locals", None)
-    if not isinstance(locals_ns, dict):
+    # rlm LocalREPL keeps user variables in env.locals and reserved tools in env.globals.
+    namespaces: list[dict[str, Any]] = []
+    for attr in ("locals", "namespace", "globals"):
+        ns = getattr(env, attr, None)
+        if isinstance(ns, dict):
+            namespaces.append(ns)
+    if not namespaces:
         return None
 
     # Prefer explicit names first.
     preferred_names = (
-        "FINAL_VAR",
+        "triage_results",
         "final_var",
         "final_results",
-        "triage_results",
         "results",
         "output",
     )
     for name in preferred_names:
-        if name in locals_ns and _looks_like_triage_payload(locals_ns[name]):
-            return locals_ns[name]
+        for ns in namespaces:
+            if name in ns and _looks_like_triage_payload(ns[name]):
+                return ns[name]
 
     # Fall back to best matching list-of-dicts payload in REPL locals.
     candidates: list[list[dict[str, Any]]] = []
-    for value in locals_ns.values():
-        if _looks_like_triage_payload(value):
-            candidates.append(value)
+    for ns in namespaces:
+        for value in ns.values():
+            if _looks_like_triage_payload(value):
+                candidates.append(value)
     if not candidates:
         return None
     candidates.sort(key=len, reverse=True)
@@ -414,14 +420,14 @@ def main():
     print("Creating frontier RLM...")
     rlm = create_frontier_rlm(config)
 
-    prompt = "Analyze ALL open PRs. Filter prs for state=='open'. Score each for urgency (1-10) and quality (1-10), assign a state (ready/needs_author_review/triage), and produce the full triage JSON list. Use the diff field on each PR for deep code analysis. Store results in FINAL_VAR as a JSON list."
+    prompt = "Analyze ALL open PRs. Filter prs for state=='open'. Score each for urgency (1-10) and quality (1-10), assign a state (ready/needs_author_review/triage), and produce the full triage JSON list. Use the diff field on each PR for deep code analysis. Store results in triage_results as a JSON list."
 
     print(f"Running RLM with prompt: {prompt}")
     print("=" * 80)
 
     result = rlm.completion(prompt)
     response_text = _extract_response_text(result)
-    repl_payload = _extract_final_var_from_repl(rlm)
+    repl_payload = _extract_triage_results_from_repl(rlm)
     result_payload = repl_payload if repl_payload is not None else _parse_result_payload(result)
 
     print("=" * 80)

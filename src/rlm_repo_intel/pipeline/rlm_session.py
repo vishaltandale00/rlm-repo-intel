@@ -7,6 +7,7 @@ from typing import Any
 from rlm import RLM
 
 from rlm_repo_intel.prompts.root_prompts import ROOT_FRONTIER_PROMPT
+from rlm_repo_intel.tools.dashboard_callback import push_partial_results, push_trace_step
 from rlm_repo_intel.tools.repo_loader import (
     build_issue_table,
     build_pr_table,
@@ -43,6 +44,8 @@ def create_frontier_rlm(config: dict[str, Any]) -> RLM:
         "web_search": web_search,
         "git_log": partial(git_log, repo_dir=str(repo_dir)),
         "git_blame": partial(git_blame, repo_dir=str(repo_dir)),
+        "push_partial_results": push_partial_results,
+        "push_trace_step": push_trace_step,
     }
 
     prompt_with_tables = ROOT_FRONTIER_PROMPT
