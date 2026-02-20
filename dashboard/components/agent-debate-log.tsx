@@ -1,115 +1,215 @@
 "use client";
 
-import { useState } from "react";
+import { EvaluationItem } from "@/components/types";
+import { useEffect, useMemo, useState } from "react";
 
 interface AgentDebateLogProps {
-  evaluations: Array<{
-    pr_number: number;
-    title: string;
-    agent_traces?: {
-      code_analyst?: { reasoning?: string; risk_score?: number; quality_score?: number };
-      codebase_expert?: { reasoning?: string; strategic_value?: number; novelty_score?: number };
-      risk_assessor?: { reasoning?: string; risk_score?: number };
-      adversarial_reviewer?: { reasoning?: string; rejection_confidence?: number; counter_arguments?: string[] };
-      synthesizer?: { synthesis_reasoning?: string };
-      disagreement_points?: string[];
-    };
-  }>;
+  evaluations: EvaluationItem[];
+  selectedPR: number | null;
+  onSelectPR: (prNumber: number) => void;
 }
 
-const AGENT_COLORS: Record<string, string> = {
-  code_analyst: "border-blue-500 text-blue-400",
-  codebase_expert: "border-green-500 text-green-400",
-  risk_assessor: "border-amber-500 text-amber-400",
-  adversarial_reviewer: "border-red-500 text-red-400",
-  synthesizer: "border-purple-500 text-purple-400",
+type AgentKey =
+  | "code_analyst"
+  | "codebase_expert"
+  | "risk_assessor"
+  | "adversarial_reviewer"
+  | "synthesizer";
+
+const AGENT_ORDER: AgentKey[] = [
+  "code_analyst",
+  "codebase_expert",
+  "risk_assessor",
+  "adversarial_reviewer",
+  "synthesizer",
+];
+
+const AGENT_LABELS: Record<AgentKey, string> = {
+  code_analyst: "Code Analyst",
+  codebase_expert: "Codebase Expert",
+  risk_assessor: "Risk Assessor",
+  adversarial_reviewer: "Adversarial Reviewer",
+  synthesizer: "Synthesizer",
 };
 
-const AGENT_ICONS: Record<string, string> = {
-  code_analyst: "🔍",
-  codebase_expert: "🏗️",
-  risk_assessor: "⚠️",
-  adversarial_reviewer: "👹",
-  synthesizer: "⚖️",
-};
+function scorePairs(agent: AgentKey, trace: Record<string, unknown>): Array<[string, number]> {
+  const pick = (k: string) => {
+    const v = trace[k];
+    return typeof v === "number" ? v : null;
+  };
 
-export function AgentDebateLog({ evaluations }: AgentDebateLogProps) {
-  const [selectedPR, setSelectedPR] = useState<number | null>(null);
+  if (agent === "code_analyst") {
+    return [
+      ["risk", pick("risk_score")],
+      ["quality", pick("quality_score")],
+    ].filter((x): x is [string, number] => x[1] !== null);
+  }
 
-  const withTraces = evaluations.filter((e) => e.agent_traces);
+  if (agent === "codebase_expert") {
+    return [
+      ["value", pick("strategic_value")],
+      ["novelty", pick("novelty_score")],
+    ].filter((x): x is [string, number] => x[1] !== null);
+  }
+
+  if (agent === "risk_assessor") {
+    return [["risk", pick("risk_score")]].filter((x): x is [string, number] => x[1] !== null);
+  }
+
+  if (agent === "adversarial_reviewer") {
+    return [["reject", pick("rejection_confidence")]].filter(
+      (x): x is [string, number] => x[1] !== null
+    );
+  }
+
+  return [];
+}
+
+function Bubble({
+  agent,
+  text,
+  scores,
+  counterArguments,
+}: {
+  agent: AgentKey;
+  text: string;
+  scores: Array<[string, number]>;
+  counterArguments?: string[];
+}) {
+  const alignment =
+    agent === "adversarial_reviewer"
+      ? "justify-end"
+      : agent === "synthesizer"
+        ? "justify-center"
+        : "justify-start";
+
+  const bubbleClass =
+    agent === "code_analyst"
+      ? "max-w-[85%] border-blue-500/50 bg-blue-500/12"
+      : agent === "codebase_expert"
+        ? "max-w-[85%] border-emerald-500/50 bg-emerald-500/12"
+        : agent === "risk_assessor"
+          ? "max-w-[85%] border-amber-500/50 bg-amber-500/12"
+          : agent === "adversarial_reviewer"
+            ? "max-w-[85%] border-red-500/50 bg-red-500/12"
+            : "max-w-[78%] border-purple-500/50 bg-purple-500/14";
+
+  return (
+    <div className={`flex ${alignment}`}>
+      <div className={`rounded-lg border p-3 ${bubbleClass}`}>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <div className="text-xs font-semibold uppercase tracking-wide text-neutral-200">
+            {AGENT_LABELS[agent]}
+          </div>
+          {scores.length > 0 && (
+            <div className="flex gap-1">
+              {scores.map(([label, value]) => (
+                <span
+                  key={label}
+                  className="rounded bg-black/30 px-1.5 py-0.5 font-mono text-[10px] text-neutral-200"
+                >
+                  {label}:{value.toFixed(2)}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <p className="whitespace-pre-wrap text-sm text-neutral-100">{text}</p>
+
+        {counterArguments && counterArguments.length > 0 && (
+          <div className="mt-2 rounded border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-100">
+            {counterArguments.join("; ")}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function AgentDebateLog({ evaluations, selectedPR, onSelectPR }: AgentDebateLogProps) {
+  const withTraces = useMemo(
+    () => evaluations.filter((evaluation) => evaluation.agent_traces),
+    [evaluations]
+  );
+
+  const [expandedPR, setExpandedPR] = useState<number | null>(selectedPR);
+
+  useEffect(() => {
+    if (selectedPR !== null) {
+      setExpandedPR(selectedPR);
+    }
+  }, [selectedPR]);
+
   if (withTraces.length === 0) {
     return <div className="text-neutral-500">Agent reasoning traces will appear here during processing.</div>;
   }
 
-  const selected = withTraces.find((e) => e.pr_number === selectedPR) || withTraces[0];
-
   return (
-    <div className="grid md:grid-cols-[200px_1fr] gap-4">
-      <div className="space-y-1 max-h-96 overflow-y-auto">
-        {withTraces.slice(0, 30).map((ev) => (
-          <button
-            key={ev.pr_number}
-            onClick={() => setSelectedPR(ev.pr_number)}
-            className={`w-full text-left text-sm px-2 py-1.5 rounded transition-colors ${
-              selected?.pr_number === ev.pr_number
-                ? "bg-blue-500/20 text-blue-400"
-                : "text-neutral-400 hover:bg-neutral-800"
-            }`}
-          >
-            #{ev.pr_number}
-          </button>
-        ))}
-      </div>
+    <div className="space-y-3">
+      {withTraces.slice(0, 40).map((evaluation) => {
+        const isExpanded = expandedPR === evaluation.pr_number;
+        const traces = evaluation.agent_traces;
+        const disagreements = traces?.disagreement_points ?? [];
 
-      {selected?.agent_traces && (
-        <div className="space-y-3">
-          <h3 className="text-sm font-semibold text-neutral-300">
-            PR #{selected.pr_number}: {selected.title}
-          </h3>
-
-          {Object.entries(selected.agent_traces).map(([agent, trace]) => {
-            if (agent === "disagreement_points") {
-              const points = trace as string[];
-              if (!points?.length) return null;
-              return (
-                <div key={agent} className="bg-amber-500/5 border border-amber-500/30 rounded-lg p-3">
-                  <div className="text-amber-400 text-sm font-semibold mb-1">
-                    ⚡ Disagreement Points
-                  </div>
-                  <ul className="text-xs text-neutral-300 space-y-1">
-                    {points.map((p, i) => (
-                      <li key={i}>• {p}</li>
-                    ))}
-                  </ul>
-                </div>
-              );
-            }
-
-            const agentTrace = trace as Record<string, unknown>;
-            const color = AGENT_COLORS[agent] || "border-neutral-500 text-neutral-400";
-            const icon = AGENT_ICONS[agent] || "🤖";
-
-            return (
-              <div
-                key={agent}
-                className={`border-l-2 ${color.split(" ")[0]} bg-[var(--card)] rounded-r-lg p-3`}
-              >
-                <div className={`text-sm font-semibold ${color.split(" ")[1]} mb-1`}>
-                  {icon} {agent.replace("_", " ")}
-                </div>
-                <div className="text-xs text-neutral-300">
-                  {String(agentTrace.reasoning || agentTrace.synthesis_reasoning || JSON.stringify(agentTrace, null, 2))}
-                </div>
-                {Array.isArray(agentTrace.counter_arguments) && (
-                  <div className="mt-1 text-xs text-red-300/80">
-                    Counter: {(agentTrace.counter_arguments as string[]).join("; ")}
-                  </div>
-                )}
+        return (
+          <div key={evaluation.pr_number} className="rounded-lg border border-[var(--border)] bg-[var(--card)]">
+            <button
+              type="button"
+              onClick={() => {
+                onSelectPR(evaluation.pr_number);
+                setExpandedPR(isExpanded ? null : evaluation.pr_number);
+              }}
+              className={`flex w-full items-center justify-between gap-3 px-3 py-3 text-left transition-colors ${
+                selectedPR === evaluation.pr_number ? "bg-blue-500/10" : "hover:bg-neutral-900/60"
+              }`}
+            >
+              <div className="min-w-0">
+                <div className="font-mono text-xs text-blue-300">PR #{evaluation.pr_number}</div>
+                <div className="truncate text-sm text-neutral-200">{evaluation.title}</div>
               </div>
-            );
-          })}
-        </div>
-      )}
+              <div className="shrink-0 rounded bg-neutral-900 px-2 py-1 font-mono text-xs text-neutral-300">
+                {isExpanded ? "Hide debate" : "Open debate"}
+              </div>
+            </button>
+
+            {isExpanded && traces && (
+              <div className="space-y-2 border-t border-[var(--border)] px-3 py-3">
+                {AGENT_ORDER.map((agent, index) => {
+                  const trace = traces[agent];
+                  if (!trace) return null;
+
+                  const traceObj = trace as Record<string, unknown>;
+                  const text = String(
+                    traceObj.reasoning ?? traceObj.synthesis_reasoning ?? "No reasoning available."
+                  );
+
+                  return (
+                    <div key={`${evaluation.pr_number}-${agent}`} className="space-y-2">
+                      <Bubble
+                        agent={agent}
+                        text={text}
+                        scores={scorePairs(agent, traceObj)}
+                        counterArguments={
+                          Array.isArray(traceObj.counter_arguments)
+                            ? (traceObj.counter_arguments as string[])
+                            : undefined
+                        }
+                      />
+                      {index === 2 && disagreements.length > 0 && (
+                        <div className="rounded border border-yellow-500/40 bg-yellow-500/12 px-3 py-2 text-xs text-yellow-100">
+                          <span className="mr-1 font-semibold uppercase tracking-wide">Disagreement:</span>
+                          {disagreements.join(" | ")}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
