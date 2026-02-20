@@ -20,7 +20,9 @@ def export_results(config: dict, fmt: str, output_dir: str, push_url: str | None
         "architecture": results_dir / "architecture.json",
         "module_cards": results_dir / "module_cards.json",
         "pr_evaluations": results_dir / "pr_evaluations.jsonl",
+        "pr_reasoning_traces": results_dir / "pr_reasoning_traces.jsonl",
         "pr_relations": results_dir / "pr_relations.jsonl",
+        "pr_relation_debates": results_dir / "pr_relation_debates.jsonl",
         "pr_clusters": results_dir / "pr_clusters.json",
         "final_ranking": results_dir / "final_ranking.json",
     }

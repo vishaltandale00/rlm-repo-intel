@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from collections import defaultdict
 from typing import Any
 
@@ -18,6 +18,9 @@ class PRPairRelation:
     relation_type: str  # redundant, alternative, conflicting, composable, unrelated
     confidence: float
     explanation: str
+    proposal: dict[str, Any] = field(default_factory=dict)
+    challenge: dict[str, Any] = field(default_factory=dict)
+    resolution_reasoning: str = ""
 
 
 def run_synthesis(config: dict, top_n: int = 200):
@@ -47,11 +50,13 @@ def run_synthesis(config: dict, top_n: int = 200):
     candidates = _generate_candidates(evals, config)
     console.print(f"  → {len(candidates)} candidate pairs")
 
-    # Step 2: Adjudicate pairs with RLM
-    console.print("  Adjudicating pairs...")
+    # Step 2: Adjudicate pairs with debate
+    console.print("  Adjudicating pairs with multi-agent debate...")
     from ..rlm_factory import try_create_rlm
+
     worker = try_create_rlm(config["models"]["cheap_worker"], label="synthesis-worker")
-    relations = _adjudicate_pairs(candidates, evals, worker)
+    root = try_create_rlm(config["models"]["root"], label="synthesis-root", verbose=True)
+    relations = _adjudicate_pairs(candidates, evals, worker, root)
     console.print(f"  → {len(relations)} relations found")
 
     # Step 3: Build clusters from relations
@@ -59,13 +64,24 @@ def run_synthesis(config: dict, top_n: int = 200):
 
     # Step 4: Final ranking with root model
     console.print("  Computing final ranking...")
-    root = try_create_rlm(config["models"]["root"], label="synthesis-root", verbose=True)
     ranking = _final_ranking(evals, relations, clusters, root, top_n)
 
     # Save everything
     with open(results_dir / "pr_relations.jsonl", "w") as f:
         for rel in relations:
             f.write(json.dumps(asdict(rel)) + "\n")
+
+    with open(results_dir / "pr_relation_debates.jsonl", "w") as f:
+        for rel in relations:
+            debate = {
+                "pr_a": rel.pr_a,
+                "pr_b": rel.pr_b,
+                "relation_type": rel.relation_type,
+                "proposal": rel.proposal,
+                "challenge": rel.challenge,
+                "resolution_reasoning": rel.resolution_reasoning,
+            }
+            f.write(json.dumps(debate) + "\n")
 
     with open(results_dir / "pr_clusters.json", "w") as f:
         json.dump(clusters, f, indent=2)
@@ -81,7 +97,7 @@ def run_synthesis(config: dict, top_n: int = 200):
 
 def _generate_candidates(evals: list[dict], config: dict) -> list[tuple[int, int]]:
     """Generate candidate PR pairs for comparison.
-    
+
     Uses cheap heuristics — no LLM calls:
     - Same module overlap
     - Similar issue references
@@ -132,11 +148,9 @@ def _adjudicate_pairs(
     candidates: list[tuple[int, int]],
     evals: list[dict],
     worker,
+    root,
 ) -> list[PRPairRelation]:
-    """Use RLM worker to determine relationship between PR pairs."""
-    if worker is None:
-        return []
-
+    """Use proposer/challenger/synthesizer agents to determine PR pair relationships."""
     evals_by_number = {
         ev["pr_number"]: ev for ev in evals if isinstance(ev.get("pr_number"), int)
     }
@@ -148,48 +162,151 @@ def _adjudicate_pairs(
         if not ev_a or not ev_b:
             continue
 
-        prompt = f"""Compare these two PRs and determine their relationship.
+        workspace = {
+            "pr_a": {
+                "number": pr_a,
+                "title": ev_a.get("title", ""),
+                "summary": ev_a.get("review_summary", "N/A"),
+                "impact_scope": ev_a.get("impact_scope", []),
+                "scores": {
+                    "risk": ev_a.get("risk_score", 0.5),
+                    "quality": ev_a.get("quality_score", 0.5),
+                    "strategic_value": ev_a.get("strategic_value", 0.5),
+                    "novelty": ev_a.get("novelty_score", 0.5),
+                },
+            },
+            "pr_b": {
+                "number": pr_b,
+                "title": ev_b.get("title", ""),
+                "summary": ev_b.get("review_summary", "N/A"),
+                "impact_scope": ev_b.get("impact_scope", []),
+                "scores": {
+                    "risk": ev_b.get("risk_score", 0.5),
+                    "quality": ev_b.get("quality_score", 0.5),
+                    "strategic_value": ev_b.get("strategic_value", 0.5),
+                    "novelty": ev_b.get("novelty_score", 0.5),
+                },
+            },
+        }
 
-PR #{pr_a}: {ev_a['title']}
-Summary: {ev_a.get('review_summary', 'N/A')}
-Modules: {ev_a.get('impact_scope', [])}
+        proposal = _run_relation_proposer(worker, workspace)
+        workspace["proposal"] = proposal
 
-PR #{pr_b}: {ev_b['title']}
-Summary: {ev_b.get('review_summary', 'N/A')}
-Modules: {ev_b.get('impact_scope', [])}
+        challenge = _run_relation_challenger(worker, workspace)
+        workspace["challenge"] = challenge
 
-Classify as one of:
-- redundant: solves same problem with same approach
-- alternative: same goal, different approach
-- conflicting: incompatible changes
-- composable: can be merged together
-- unrelated: no meaningful relationship
+        resolved = _run_relation_synthesizer(root or worker, workspace)
 
-Return JSON: {{"relation": "...", "confidence": 0.0-1.0, "explanation": "..."}}"""
-
-        try:
-            result = worker.completion(prompt)
-            parsed = _parse_json_response(_extract_completion_text(result))
-        except Exception as exc:
-            console.print(
-                f"[yellow]Warning: failed to adjudicate PR pair ({pr_a}, {pr_b}): {exc}[/]"
-            )
-            continue
-
-        relation = parsed.get("relation")
+        relation = resolved.get("relation")
         if relation not in {"redundant", "alternative", "conflicting", "composable", "unrelated"}:
-            continue
+            relation = proposal.get("relation", "unrelated")
+
         if relation == "unrelated":
             continue
-        relations.append(PRPairRelation(
-            pr_a=pr_a,
-            pr_b=pr_b,
-            relation_type=relation,
-            confidence=_safe_score(parsed.get("confidence"), default=0.5),
-            explanation=str(parsed.get("explanation", "")),
-        ))
+
+        relations.append(
+            PRPairRelation(
+                pr_a=pr_a,
+                pr_b=pr_b,
+                relation_type=relation,
+                confidence=_safe_score(
+                    resolved.get("confidence"),
+                    default=_safe_score(proposal.get("confidence"), default=0.5),
+                ),
+                explanation=str(
+                    resolved.get("explanation")
+                    or proposal.get("explanation")
+                    or "No explanation provided."
+                ),
+                proposal=proposal,
+                challenge=challenge,
+                resolution_reasoning=str(resolved.get("resolution_reasoning") or ""),
+            )
+        )
 
     return relations
+
+
+def _run_relation_proposer(model, workspace: dict[str, Any]) -> dict[str, Any]:
+    prompt = f"""You are Cross-PR Proposer.
+Propose the most likely relationship between these PRs.
+
+REPL variables:
+pr_a = {json.dumps(workspace['pr_a'], indent=2)}
+pr_b = {json.dumps(workspace['pr_b'], indent=2)}
+
+Classify as one of:
+- redundant
+- alternative
+- conflicting
+- composable
+- unrelated
+
+Return JSON with:
+- relation
+- confidence (0-1)
+- explanation
+- overlap_evidence: list[str]
+"""
+
+    fallback = {
+        "relation": "unrelated",
+        "confidence": 0.3,
+        "explanation": "No proposer model output.",
+        "overlap_evidence": [],
+    }
+    return _run_agent(model, prompt, fallback)
+
+
+def _run_relation_challenger(model, workspace: dict[str, Any]) -> dict[str, Any]:
+    prompt = f"""You are Cross-PR Adversarial Reviewer.
+Challenge the proposer's relationship claim and argue why it could be wrong.
+
+REPL variables:
+pr_a = {json.dumps(workspace['pr_a'], indent=2)}
+pr_b = {json.dumps(workspace['pr_b'], indent=2)}
+proposal = {json.dumps(workspace['proposal'], indent=2)}
+
+Return JSON with:
+- challenge_strength (0-1)
+- challenge_points: list[str]
+- alternative_relation: one of [redundant, alternative, conflicting, composable, unrelated]
+- counter_explanation
+"""
+
+    fallback = {
+        "challenge_strength": 0.0,
+        "challenge_points": [],
+        "alternative_relation": workspace["proposal"].get("relation", "unrelated"),
+        "counter_explanation": "No challenger model output.",
+    }
+    return _run_agent(model, prompt, fallback)
+
+
+def _run_relation_synthesizer(model, workspace: dict[str, Any]) -> dict[str, Any]:
+    prompt = f"""You are Cross-PR Synthesizer.
+Resolve disagreement between proposer and adversarial challenger.
+
+REPL variables:
+pr_a = {json.dumps(workspace['pr_a'], indent=2)}
+pr_b = {json.dumps(workspace['pr_b'], indent=2)}
+proposal = {json.dumps(workspace['proposal'], indent=2)}
+challenge = {json.dumps(workspace['challenge'], indent=2)}
+
+Return JSON with:
+- relation
+- confidence (0-1)
+- explanation
+- resolution_reasoning: explicitly explain why one side was accepted or partially accepted
+"""
+
+    fallback = {
+        "relation": workspace["proposal"].get("relation", "unrelated"),
+        "confidence": _safe_score(workspace["proposal"].get("confidence"), default=0.4),
+        "explanation": workspace["proposal"].get("explanation", "No synthesis output."),
+        "resolution_reasoning": "Fallback selected proposal due to missing synthesizer output.",
+    }
+    return _run_agent(model, prompt, fallback)
 
 
 def _build_clusters(relations: list[PRPairRelation]) -> list[dict]:
@@ -277,14 +394,14 @@ Top candidate PRs (pre-ranked by composite score):
 } for e in top_candidates[:50]], indent=2)}
 
 PR clusters (groups of related/redundant/conflicting PRs):
-{json.dumps(clusters[:20], indent=2)}
+{json.dumps(clusters[:20], indent=2)[:7000]}
 
 From these candidates, select the top {top_n} PRs worth watching/merging.
 For each redundancy cluster, pick the best representative.
 Flag any critical conflicts.
 
 Return JSON with:
-- ranking: list of {{number, rank, reason}} 
+- ranking: list of {{number, rank, reason}}
 - conflicts: list of critical conflict groups
 - themes: top 5 themes/areas these PRs address
 """
@@ -298,6 +415,25 @@ Return JSON with:
     except Exception as exc:
         console.print(f"[yellow]Warning: final ranking failed: {exc}[/]")
         return {"pre_ranking": [e["pr_number"] for e in sorted_evals[:top_n]]}
+
+
+def _run_agent(model, prompt: str, fallback: dict[str, Any]) -> dict[str, Any]:
+    if model is None:
+        return fallback
+
+    try:
+        result = model.completion(prompt)
+        parsed = _parse_json_response(_extract_completion_text(result))
+    except Exception as exc:
+        console.print(f"[yellow]Warning: synthesis agent failed: {exc}[/]")
+        return fallback
+
+    if not isinstance(parsed, dict):
+        return fallback
+
+    merged = dict(fallback)
+    merged.update(parsed)
+    return merged
 
 
 def _parse_json_response(response: str) -> dict:
