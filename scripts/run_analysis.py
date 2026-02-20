@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run full analysis pipeline and stream updates to dashboard."""
+"""Run full analysis pipeline and stream updates to dashboard storage."""
 
 from __future__ import annotations
 
@@ -11,8 +11,6 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 # Allow running without requiring package installation.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
@@ -20,14 +18,17 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from rlm_repo_intel.config import load_config
+from rlm_repo_intel.dashboard_push import (
+    push_clusters,
+    push_evaluation,
+    push_ranking,
+    push_summary,
+)
 from rlm_repo_intel.evaluation import pr_eval
 from rlm_repo_intel.graph.store import GraphStore
 from rlm_repo_intel.modeling import build_codebase_model
 from rlm_repo_intel.rlm_factory import try_create_rlm
 from rlm_repo_intel.synthesis import run_synthesis
-
-
-DEFAULT_DASHBOARD_URL = "https://rlm-repo-intel-dashboard.vercel.app"
 
 
 def _read_json(path: Path, fallback: Any) -> Any:
@@ -56,31 +57,6 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return items
 
 
-def _dashboard_url() -> str:
-    url = os.getenv("DASHBOARD_URL")
-    if url:
-        return url.rstrip("/")
-
-    vercel_url = os.getenv("VERCEL_URL")
-    if vercel_url:
-        if vercel_url.startswith("http://") or vercel_url.startswith("https://"):
-            return vercel_url.rstrip("/")
-        return f"https://{vercel_url.rstrip('/')}"
-
-    return DEFAULT_DASHBOARD_URL
-
-
-def _push_payload(client: httpx.Client, payload: dict[str, Any]) -> bool:
-    try:
-        resp = client.post("/api/push", json=payload)
-        resp.raise_for_status()
-        return True
-    except Exception as exc:
-        payload_type = payload.get("type", "unknown")
-        print(f"[warn] push failed for {payload_type}: {exc}")
-        return False
-
-
 def _compute_summary(results_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
     cards = _read_json(results_dir / "module_cards.json", {})
     ranking = _read_json(results_dir / "final_ranking.json", {})
@@ -105,7 +81,7 @@ def _compute_summary(results_dir: Path, config: dict[str, Any]) -> dict[str, Any
     }
 
 
-def _run_phase2_and_push(config: dict[str, Any], client: httpx.Client, limit: int | None) -> int:
+def _run_phase2_and_push(config: dict[str, Any], limit: int | None) -> int:
     print("[phase2] Loading graph and context...")
     data_dir = Path(config["paths"]["data_dir"])
     results_dir = Path(config["paths"]["results_dir"])
@@ -153,8 +129,11 @@ def _run_phase2_and_push(config: dict[str, Any], client: httpx.Client, limit: in
             continue
 
         evaluations.append(ev)
-        if _push_payload(client, {"type": "evaluation", "data": asdict(ev)}):
+        try:
+            push_evaluation(asdict(ev))
             pushed += 1
+        except Exception as exc:
+            print(f"[warn] push failed for evaluation PR #{ev.pr_number}: {exc}")
         print(f"[phase2] {idx}/{len(prs)} PR #{ev.pr_number} evaluated")
 
     eval_path = results_dir / "pr_evaluations.jsonl"
@@ -174,7 +153,7 @@ def _run_phase2_and_push(config: dict[str, Any], client: httpx.Client, limit: in
             }
             f.write(json.dumps(trace) + "\n")
 
-    print(f"[phase2] Complete: {len(evaluations)} evaluated, {pushed} pushed")
+    print(f"[phase2] Complete: {len(evaluations)} evaluated, {pushed} pushed to DB")
     return len(evaluations)
 
 
@@ -203,34 +182,31 @@ def main() -> int:
     print(f"[init] Loading config from {args.config}")
     config = load_config(args.config)
     _ensure_api_keys()
+    db_url_present = bool(os.getenv("DATABASE_URL"))
+    print(f"[init] Dashboard DB push enabled: {'yes' if db_url_present else 'no'}")
 
-    dashboard_url = _dashboard_url()
-    headers: dict[str, str] = {}
-    push_secret = os.getenv("PUSH_SECRET")
-    if push_secret:
-        headers["Authorization"] = f"Bearer {push_secret}"
-    print(f"[init] Dashboard push URL: {dashboard_url}/api/push")
+    print("[phase1] build_codebase_model starting...")
+    build_codebase_model(config)
+    print("[phase1] Complete")
 
-    with httpx.Client(base_url=dashboard_url, timeout=30.0, headers=headers) as client:
-        print("[phase1] build_codebase_model starting...")
-        build_codebase_model(config)
-        print("[phase1] Complete")
+    _run_phase2_and_push(config, limit=args.limit)
 
-        _run_phase2_and_push(config, client, limit=args.limit)
+    print("[phase3] run_synthesis starting...")
+    run_synthesis(config, top_n=args.top_n)
+    print("[phase3] Complete")
 
-        print("[phase3] run_synthesis starting...")
-        run_synthesis(config, top_n=args.top_n)
-        print("[phase3] Complete")
+    results_dir = Path(config["paths"]["results_dir"])
+    clusters = _read_json(results_dir / "pr_clusters.json", [])
+    ranking = _read_json(results_dir / "final_ranking.json", {"ranking": [], "themes": [], "conflicts": []})
+    summary = _compute_summary(results_dir, config)
 
-        results_dir = Path(config["paths"]["results_dir"])
-        clusters = _read_json(results_dir / "pr_clusters.json", [])
-        ranking = _read_json(results_dir / "final_ranking.json", {"ranking": [], "themes": [], "conflicts": []})
-        summary = _compute_summary(results_dir, config)
-
-        _push_payload(client, {"type": "clusters", "data": clusters})
-        _push_payload(client, {"type": "ranking", "data": ranking})
-        _push_payload(client, {"type": "summary", "data": summary})
-        print("[push] Final clusters, ranking, and summary pushed")
+    try:
+        push_clusters(clusters)
+        push_ranking(ranking)
+        push_summary(summary)
+        print("[push] Final clusters, ranking, and summary pushed to DB")
+    except Exception as exc:
+        print(f"[warn] final push failed: {exc}")
 
     print("[done] Pipeline complete")
     return 0

@@ -17,6 +17,7 @@ dependencies = [
     "rlms>=0.1.0",
     "click>=8.0",
     "httpx>=0.27",
+    "psycopg2-binary>=2.9",
     "pyyaml>=6.0",
     "rich>=13.0",
     "tree-sitter>=0.23",
