@@ -59,6 +59,7 @@ function getSQL() {
 // Auto-create tables on first use
 let initialized = false;
 const RUNS_KEY = "rlm:runs";
+const CURRENT_RUN_ID_KEY = "rlm:current_run_id";
 export const LEGACY_RUN_ID = "legacy";
 const LEGACY_SUMMARY_KEY = "rlm:summary";
 const LEGACY_EVALUATIONS_KEY = "rlm:evaluations";
@@ -104,6 +105,17 @@ async function writeKV(key: string, value: unknown): Promise<void> {
       VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
       ON CONFLICT (key) DO UPDATE SET value = ${JSON.stringify(value)}::jsonb, updated_at = NOW()
     `;
+  } catch {
+    // graceful fallback
+  }
+}
+
+async function deleteKV(key: string): Promise<void> {
+  const sql = getSQL();
+  if (!sql) return;
+  try {
+    await ensureTables();
+    await sql`DELETE FROM rlm_kv WHERE key = ${key}`;
   } catch {
     // graceful fallback
   }
@@ -160,6 +172,10 @@ export function createRunId() {
   return String(Date.now());
 }
 
+export async function clearCurrentRunId() {
+  await deleteKV(CURRENT_RUN_ID_KEY);
+}
+
 async function hasLegacyData() {
   const [summary, evaluations, clusters, ranking, trace] = await Promise.all([
     readKV<AnalysisSummary | null>(LEGACY_SUMMARY_KEY, null),
@@ -201,6 +217,31 @@ async function ensureRun(runId: string) {
       timestamp: toTimestamp(runId, new Date().toISOString()),
     } satisfies RunInfo);
   }
+}
+
+export async function getCurrentRunId(): Promise<string | null> {
+  const runId = await readKV<string | null>(CURRENT_RUN_ID_KEY, null);
+  if (!runId) return null;
+  const runIds = await getRunIds();
+  if (runIds.includes(runId)) return runId;
+  await clearCurrentRunId();
+  return null;
+}
+
+export async function getOrCreateCurrentRunId(): Promise<string> {
+  const existing = await getCurrentRunId();
+  if (existing) return existing;
+  const runId = createRunId();
+  await ensureRun(runId);
+  await writeKV(CURRENT_RUN_ID_KEY, runId);
+  return runId;
+}
+
+export async function startNewCurrentRun(): Promise<string> {
+  const runId = createRunId();
+  await ensureRun(runId);
+  await writeKV(CURRENT_RUN_ID_KEY, runId);
+  return runId;
 }
 
 export async function getRuns(): Promise<RunInfo[]> {
@@ -330,4 +371,91 @@ export async function setLegacyAgentTrace(data: AgentTraceStep[]) {
 async function getEvaluationCount(runId: string) {
   const evaluations = await getEvaluations(runId);
   return Array.isArray(evaluations) ? evaluations.length : 0;
+}
+
+async function deleteRun(runId: string) {
+  const runIds = await getRunIds();
+  if (!runIds.includes(runId)) return;
+
+  if (runId === LEGACY_RUN_ID) {
+    await Promise.all([
+      deleteKV(LEGACY_SUMMARY_KEY),
+      deleteKV(LEGACY_EVALUATIONS_KEY),
+      deleteKV(LEGACY_CLUSTERS_KEY),
+      deleteKV(LEGACY_RANKING_KEY),
+      deleteKV(LEGACY_AGENT_TRACE_KEY),
+    ]);
+  } else {
+    await Promise.all([
+      deleteKV(runKey(runId, "meta")),
+      deleteKV(runKey(runId, "summary")),
+      deleteKV(runKey(runId, "evaluations")),
+      deleteKV(runKey(runId, "clusters")),
+      deleteKV(runKey(runId, "ranking")),
+      deleteKV(runKey(runId, "agent_trace")),
+    ]);
+  }
+
+  await writeKV(
+    RUNS_KEY,
+    runIds.filter((id) => id !== runId)
+  );
+}
+
+export interface CleanupRunsResult {
+  legacy_run_id: string | null;
+  best_run_id: string | null;
+  kept_run_ids: string[];
+  deleted_run_ids: string[];
+}
+
+export async function cleanupRuns(): Promise<CleanupRunsResult> {
+  const runs = await getRuns();
+  if (runs.length === 0) {
+    return {
+      legacy_run_id: null,
+      best_run_id: null,
+      kept_run_ids: [],
+      deleted_run_ids: [],
+    };
+  }
+
+  const runCounts = await Promise.all(
+    runs.map(async (run) => ({
+      runId: run.id,
+      evaluationCount: await getEvaluationCount(run.id),
+    }))
+  );
+
+  const legacyDataRun = runCounts.reduce((winner, current) =>
+    current.evaluationCount > winner.evaluationCount ? current : winner
+  );
+  const bestRunId = await getLatestRunId();
+
+  const keep = new Set<string>();
+  if (legacyDataRun.runId) keep.add(legacyDataRun.runId);
+  if (bestRunId) keep.add(bestRunId);
+
+  const deleted: string[] = [];
+  for (const run of runs) {
+    if (keep.has(run.id)) continue;
+    await deleteRun(run.id);
+    deleted.push(run.id);
+  }
+
+  const currentRunId = await getCurrentRunId();
+  if (currentRunId && !keep.has(currentRunId)) {
+    if (bestRunId && keep.has(bestRunId)) {
+      await writeKV(CURRENT_RUN_ID_KEY, bestRunId);
+    } else {
+      await clearCurrentRunId();
+    }
+  }
+
+  return {
+    legacy_run_id: legacyDataRun.runId ?? null,
+    best_run_id: bestRunId,
+    kept_run_ids: Array.from(keep),
+    deleted_run_ids: deleted,
+  };
 }

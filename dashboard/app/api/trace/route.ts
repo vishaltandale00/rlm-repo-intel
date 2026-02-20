@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createRunId, getAgentTrace, getLatestRunId, setAgentTrace, type AgentTraceStep } from "@/lib/store";
+import { getAgentTrace, getLatestRunId, getOrCreateCurrentRunId, setAgentTrace, type AgentTraceStep } from "@/lib/store";
 
 export async function GET(req: NextRequest) {
   const runId = req.nextUrl.searchParams.get("run_id") ?? (await getLatestRunId());
@@ -18,7 +18,8 @@ export async function POST(req: NextRequest) {
 
   const body = await req.json();
   const trace = Array.isArray(body) ? body : body?.trace;
-  const runId = typeof body?.run_id === "string" && body.run_id.trim() ? body.run_id.trim() : createRunId();
+  const runId =
+    typeof body?.run_id === "string" && body.run_id.trim() ? body.run_id.trim() : await getOrCreateCurrentRunId();
 
   if (!Array.isArray(trace)) {
     return NextResponse.json({ error: "invalid trace payload" }, { status: 400 });

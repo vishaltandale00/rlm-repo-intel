@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   appendLegacyEvaluation,
-  createRunId,
   setLegacyAgentTrace,
   setLegacyClusters,
   setLegacyRanking,
@@ -11,11 +10,13 @@ import {
   setClusters,
   setRanking,
   setAgentTrace,
+  getOrCreateCurrentRunId,
+  startNewCurrentRun,
 } from "@/lib/store";
 
 /**
  * Push endpoint — the local Python pipeline POSTs results here.
- * Accepts: { run_id?: string, type: "summary"|"evaluation"|"evaluations_batch"|"clusters"|"ranking"|"trace", data: ... }
+ * Accepts: { run_id?: string, type: "new_run"|"summary"|"evaluation"|"evaluations_batch"|"clusters"|"ranking"|"trace", data: ... }
  * Protected by PUSH_SECRET env var.
  */
 export async function POST(req: NextRequest) {
@@ -30,10 +31,22 @@ export async function POST(req: NextRequest) {
   const body = await req.json();
   const { type, data } = body;
   const explicitRunId = typeof body?.run_id === "string" && body.run_id.trim() ? body.run_id.trim() : null;
-  const runId = explicitRunId ?? createRunId();
+
+  switch (type) {
+    case "new_run": {
+      const newRunId = await startNewCurrentRun();
+      return NextResponse.json({ ok: true, type: "new_run", run_id: newRunId });
+    }
+
+    default:
+      break;
+  }
+
+  const runId = explicitRunId ?? (await getOrCreateCurrentRunId());
   const mirrorToLegacy = !explicitRunId;
 
   switch (type) {
+
     case "summary":
       await setSummary(runId, data);
       if (mirrorToLegacy) {

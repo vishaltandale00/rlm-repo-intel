@@ -64,25 +64,42 @@ function RunSelector({ runs, selectedRunId }: { runs: RunTab[]; selectedRunId: s
 
   return (
     <section className="rounded-lg border border-neutral-800 bg-neutral-950/80 p-2">
-      <div className="flex flex-wrap gap-2">
-        {runs.map((run, index) => {
-          const selected = run.id === selectedRunId;
-          return (
-            <button
-              key={run.id}
-              type="button"
-              onClick={() => onSelect(run.id)}
-              className={`rounded-md border px-3 py-2 text-xs font-medium transition ${
-                selected
-                  ? "border-blue-400/50 bg-blue-500/20 text-blue-200"
-                  : "border-neutral-700 bg-neutral-900 text-neutral-300 hover:border-neutral-500"
-              }`}
-            >
-              {formatRunLabel(run, index)}
-            </button>
-          );
-        })}
-      </div>
+      {runs.length > 10 ? (
+        <label className="block text-xs text-neutral-300">
+          <span className="mb-2 block font-medium uppercase tracking-wide text-neutral-400">Select Run</span>
+          <select
+            className="w-full rounded-md border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-100"
+            value={selectedRunId ?? runs[0]?.id ?? ""}
+            onChange={(event) => onSelect(event.target.value)}
+          >
+            {runs.map((run, index) => (
+              <option key={run.id} value={run.id}>
+                {formatRunLabel(run, index)}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {runs.map((run, index) => {
+            const selected = run.id === selectedRunId;
+            return (
+              <button
+                key={run.id}
+                type="button"
+                onClick={() => onSelect(run.id)}
+                className={`rounded-md border px-3 py-2 text-xs font-medium transition ${
+                  selected
+                    ? "border-blue-400/50 bg-blue-500/20 text-blue-200"
+                    : "border-neutral-700 bg-neutral-900 text-neutral-300 hover:border-neutral-500"
+                }`}
+              >
+                {formatRunLabel(run, index)}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 }
