@@ -1,15 +1,27 @@
 import { DashboardClient } from "@/components/dashboard-client";
-import { getSummary, getEvaluations, getClusters, getRanking } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 30;
+
+async function getData() {
+  const base = process.env.DATA_URL || "/api";
+
+  try {
+    const [summary, evaluations, clusters, ranking] = await Promise.all([
+      fetch(`${base}/summary`).then((response) => response.json()).catch(() => null),
+      fetch(`${base}/evaluations`).then((response) => response.json()).catch(() => []),
+      fetch(`${base}/clusters`).then((response) => response.json()).catch(() => []),
+      fetch(`${base}/ranking`).then((response) => response.json()).catch(() => null),
+    ]);
+
+    return { summary, evaluations, clusters, ranking };
+  } catch {
+    return { summary: null, evaluations: [], clusters: [], ranking: null };
+  }
+}
 
 export default async function Home() {
-  const [summary, evaluations, clusters, ranking] = await Promise.all([
-    getSummary(),
-    getEvaluations(),
-    getClusters(),
-    getRanking(),
-  ]);
+  const data = await getData();
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-8">
@@ -21,10 +33,10 @@ export default async function Home() {
       </header>
 
       <DashboardClient
-        summary={summary}
-        evaluations={evaluations}
-        clusters={clusters}
-        ranking={ranking}
+        summary={data.summary}
+        evaluations={data.evaluations}
+        clusters={data.clusters}
+        ranking={data.ranking}
       />
     </main>
   );
