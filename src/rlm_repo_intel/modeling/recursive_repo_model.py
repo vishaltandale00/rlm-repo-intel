@@ -51,26 +51,13 @@ def build_codebase_model(config: dict):
     console.print(f"\n[bold]Building codebase model for {len(modules)} modules...[/]")
 
     # Configure RLM instances
+    from ..rlm_factory import try_create_rlm
+
     root_model = config["models"]["root"]
     worker_model = config["models"]["cheap_worker"]
 
-    root_rlm = None
-    worker_rlm = None
-    try:
-        root_rlm = RLM(
-            backend=_infer_backend(root_model),
-            backend_kwargs={"model_name": root_model},
-            verbose=True,
-        )
-    except Exception as exc:
-        console.print(f"[yellow]Warning: failed to initialize root RLM: {exc}[/]")
-    try:
-        worker_rlm = RLM(
-            backend=_infer_backend(worker_model),
-            backend_kwargs={"model_name": worker_model},
-        )
-    except Exception as exc:
-        console.print(f"[yellow]Warning: failed to initialize worker RLM: {exc}[/]")
+    root_rlm = try_create_rlm(root_model, label="root", verbose=True)
+    worker_rlm = try_create_rlm(worker_model, label="worker")
 
     # Phase A: Analyze each module recursively
     module_cards = {}

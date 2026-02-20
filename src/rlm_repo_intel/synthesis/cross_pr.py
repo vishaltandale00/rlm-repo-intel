@@ -49,14 +49,8 @@ def run_synthesis(config: dict, top_n: int = 200):
 
     # Step 2: Adjudicate pairs with RLM
     console.print("  Adjudicating pairs...")
-    worker = None
-    try:
-        worker = RLM(
-            backend=_infer_backend(config["models"]["cheap_worker"]),
-            backend_kwargs={"model_name": config["models"]["cheap_worker"]},
-        )
-    except Exception as exc:
-        console.print(f"[yellow]Warning: failed to initialize synthesis worker: {exc}[/]")
+    from ..rlm_factory import try_create_rlm
+    worker = try_create_rlm(config["models"]["cheap_worker"], label="synthesis-worker")
     relations = _adjudicate_pairs(candidates, evals, worker)
     console.print(f"  → {len(relations)} relations found")
 
@@ -65,14 +59,7 @@ def run_synthesis(config: dict, top_n: int = 200):
 
     # Step 4: Final ranking with root model
     console.print("  Computing final ranking...")
-    root = None
-    try:
-        root = RLM(
-            backend=_infer_backend(config["models"]["root"]),
-            backend_kwargs={"model_name": config["models"]["root"]},
-        )
-    except Exception as exc:
-        console.print(f"[yellow]Warning: failed to initialize synthesis root model: {exc}[/]")
+    root = try_create_rlm(config["models"]["root"], label="synthesis-root", verbose=True)
     ranking = _final_ranking(evals, relations, clusters, root, top_n)
 
     # Save everything

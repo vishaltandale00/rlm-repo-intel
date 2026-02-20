@@ -100,14 +100,8 @@ def evaluate_all_prs(config: dict, limit: int | None = None):
                     issues_by_number[issue_num] = issue
 
     # Configure worker RLM
-    worker = None
-    try:
-        worker = RLM(
-            backend=_infer_backend(config["models"]["cheap_worker"]),
-            backend_kwargs={"model_name": config["models"]["cheap_worker"]},
-        )
-    except Exception as exc:
-        console.print(f"[yellow]Warning: failed to initialize RLM worker: {exc}[/]")
+    from ..rlm_factory import try_create_rlm
+    worker = try_create_rlm(config["models"]["cheap_worker"], label="eval-worker")
 
     evaluations = []
 
