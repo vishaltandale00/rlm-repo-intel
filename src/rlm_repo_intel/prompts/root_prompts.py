@@ -38,6 +38,12 @@ Phase 2 deep per pull request analysis, slow and evidence heavy
 - Score urgency, quality, criticality, and risk_if_merged as floats from 1.0 to 10.0.
 - Build evidence entries with file, reference_type, detail, and optional line_hint.
 - Store this analysis in phase2_deep_analysis.
+- Summarizing diffs is acceptable but for each changed file you must explore its connections in the codebase.
+- For each changed file, use repo to trace who imports it, what modules call into it, what config references it, and what breaks if it changes.
+- Cross-module dependencies are the highest risk and most valuable insight.
+- Your analysis should demonstrate you explored BEYOND the diff to understand ripple effects across the codebase.
+- When a PR touches a core module like auth, gateway, config, or agents, grep the repo dict for all files that import or reference that module and assess downstream impact.
+- Evidence must include at least one cross-module dependency reference showing you traced the impact chain.
 - For Phase 2, you MUST analyze each PR individually. Do NOT write a loop function that scores PRs in bulk. Instead, take batches of 10-20 PRs at a time, read each diff, reference specific files from the repo dict, and write unique justifications. If any PR has a generic justification without specific file references, the entire run is invalid.
 - After each Phase 2 batch, call push_partial_results(scored_prs_list) so results stream to the dashboard.
 
