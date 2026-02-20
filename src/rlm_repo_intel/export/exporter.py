@@ -1,6 +1,7 @@
 """Export and publish results."""
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from rich.console import Console
@@ -12,6 +13,7 @@ from rlm_repo_intel.dashboard_push import (
     push_ranking,
     push_summary,
     push_trace,
+    start_new_run,
 )
 
 console = Console()
@@ -131,54 +133,62 @@ def _push_to_dashboard(summary: dict, result_files: dict):
         with open(path) as f:
             return [json.loads(line) for line in f if line.strip()]
 
-    def _push_optional(payload_type: str, data):
+    def _push_optional(payload_type: str, data, run_id: str):
         # module_cards and other export-only artifacts do not yet have dedicated wrappers.
-        dashboard_push._post(payload_type, data)
+        dashboard_push._post(payload_type, data, run_id=run_id)
 
     try:
-        push_summary(summary)
+        run_meta = {
+            "repo": summary.get("repo"),
+            "model": "anthropic/claude-sonnet-4-6",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "total_modules": summary.get("total_modules", 0),
+            "total_prs_evaluated": summary.get("total_prs_evaluated", 0),
+        }
+        run_id = start_new_run(run_meta)
+        push_summary(summary, run_id=run_id)
         console.print("    Summary: pushed")
 
         module_cards_path = result_files.get("module_cards")
         if module_cards_path and module_cards_path.exists():
-            _push_optional("module_cards", _load_json_file(module_cards_path))
+            _push_optional("module_cards", _load_json_file(module_cards_path), run_id=run_id)
             console.print("    Module cards: pushed")
 
         eval_path = result_files.get("pr_evaluations")
         if eval_path and eval_path.exists():
             evaluations = _load_jsonl_file(eval_path)
             for evaluation in evaluations:
-                push_evaluation(evaluation)
+                push_evaluation(evaluation, run_id=run_id)
             console.print(f"    PR evaluations: {len(evaluations)} pushed")
 
         clusters_path = result_files.get("pr_clusters")
         if clusters_path and clusters_path.exists():
-            push_clusters(_load_json_file(clusters_path))
+            push_clusters(_load_json_file(clusters_path), run_id=run_id)
             console.print("    Clusters: pushed")
 
         ranking_path = result_files.get("final_ranking")
         if ranking_path and ranking_path.exists():
-            push_ranking(_load_json_file(ranking_path))
+            push_ranking(_load_json_file(ranking_path), run_id=run_id)
             console.print("    Final ranking: pushed")
 
         trace_path = result_files.get("pr_reasoning_traces")
         if trace_path and trace_path.exists():
-            push_trace(_load_jsonl_file(trace_path))
+            push_trace(_load_jsonl_file(trace_path), run_id=run_id)
             console.print("    Reasoning traces: pushed")
 
         relations_path = result_files.get("pr_relations")
         if relations_path and relations_path.exists():
-            _push_optional("relations", _load_jsonl_file(relations_path))
+            _push_optional("relations", _load_jsonl_file(relations_path), run_id=run_id)
             console.print("    PR relations: pushed")
 
         debates_path = result_files.get("pr_relation_debates")
         if debates_path and debates_path.exists():
-            _push_optional("relation_debates", _load_jsonl_file(debates_path))
+            _push_optional("relation_debates", _load_jsonl_file(debates_path), run_id=run_id)
             console.print("    Relation debates: pushed")
 
         architecture_path = result_files.get("architecture")
         if architecture_path and architecture_path.exists():
-            _push_optional("architecture", _load_json_file(architecture_path))
+            _push_optional("architecture", _load_json_file(architecture_path), run_id=run_id)
             console.print("    Architecture: pushed")
     except Exception as e:
         console.print(f"    [red]Dashboard push failed: {e}[/]")
