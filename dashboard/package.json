@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
     "@vercel/kv": "^3.0.0",
     "next": "^15.3.0",
     "react": "^19.1.0",
@@ -16,12 +17,12 @@
     "recharts": "^2.15.0"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.0.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "autoprefixer": "^10.4.0",
     "postcss": "^8.4.0",
     "tailwindcss": "^4.0.0",
-    "typescript": "^5.7.0",
-    "@tailwindcss/postcss": "^4.0.0"
+    "typescript": "^5.7.0"
   }
 }

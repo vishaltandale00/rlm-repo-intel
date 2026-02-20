@@ -1,4 +1,9 @@
-import { kv } from "@vercel/kv";
+/**
+ * Neon Postgres-backed store for analysis results.
+ * Requires DATABASE_URL env var pointing to a Neon connection string.
+ */
+
+import { neon } from "@neondatabase/serverless";
 
 export interface AnalysisSummary {
   repo?: string;
@@ -38,56 +43,77 @@ export interface PRCluster {
   }>;
 }
 
-const KV_KEYS = {
-  summary: "rlm:summary",
-  evaluations: "rlm:evaluations",
-  clusters: "rlm:clusters",
-  ranking: "rlm:ranking",
-};
+function getSQL() {
+  const url = process.env.DATABASE_URL;
+  if (!url) return null;
+  return neon(url);
+}
 
-function hasKVConfig() {
-  return Boolean(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
+// Auto-create tables on first use
+let initialized = false;
+
+async function ensureTables() {
+  if (initialized) return;
+  const sql = getSQL();
+  if (!sql) return;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS rlm_kv (
+      key TEXT PRIMARY KEY,
+      value JSONB NOT NULL,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+  initialized = true;
 }
 
 async function readKV<T>(key: string, fallback: T): Promise<T> {
-  if (!hasKVConfig()) return fallback;
+  const sql = getSQL();
+  if (!sql) return fallback;
   try {
-    const value = await kv.get<T>(key);
-    return value ?? fallback;
+    await ensureTables();
+    const rows = await sql`SELECT value FROM rlm_kv WHERE key = ${key}`;
+    if (rows.length === 0) return fallback;
+    return rows[0].value as T;
   } catch {
     return fallback;
   }
 }
 
 async function writeKV(key: string, value: unknown): Promise<void> {
-  if (!hasKVConfig()) return;
+  const sql = getSQL();
+  if (!sql) return;
   try {
-    await kv.set(key, value);
+    await ensureTables();
+    await sql`
+      INSERT INTO rlm_kv (key, value, updated_at) 
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET value = ${JSON.stringify(value)}::jsonb, updated_at = NOW()
+    `;
   } catch {
-    // no-op: graceful fallback when KV is unavailable
+    // graceful fallback
   }
 }
 
 export async function getSummary(): Promise<AnalysisSummary | null> {
-  return readKV(KV_KEYS.summary, null);
+  return readKV("rlm:summary", null);
 }
 
 export async function setSummary(data: AnalysisSummary) {
   data.last_updated = new Date().toISOString();
-  await writeKV(KV_KEYS.summary, data);
+  await writeKV("rlm:summary", data);
 }
 
 export async function getEvaluations(): Promise<PREvaluation[]> {
-  return readKV(KV_KEYS.evaluations, []);
+  return readKV("rlm:evaluations", []);
 }
 
 export async function setEvaluations(data: PREvaluation[]) {
-  await writeKV(KV_KEYS.evaluations, data);
+  await writeKV("rlm:evaluations", data);
 }
 
 export async function appendEvaluation(ev: PREvaluation) {
   const existing = await getEvaluations();
-  // Replace if exists, append if new
   const idx = existing.findIndex((e) => e.pr_number === ev.pr_number);
   if (idx >= 0) existing[idx] = ev;
   else existing.push(ev);
@@ -95,17 +121,17 @@ export async function appendEvaluation(ev: PREvaluation) {
 }
 
 export async function getClusters(): Promise<PRCluster[]> {
-  return readKV(KV_KEYS.clusters, []);
+  return readKV("rlm:clusters", []);
 }
 
 export async function setClusters(data: PRCluster[]) {
-  await writeKV(KV_KEYS.clusters, data);
+  await writeKV("rlm:clusters", data);
 }
 
 export async function getRanking(): Promise<Record<string, unknown> | null> {
-  return readKV(KV_KEYS.ranking, null);
+  return readKV("rlm:ranking", null);
 }
 
 export async function setRanking(data: Record<string, unknown>) {
-  await writeKV(KV_KEYS.ranking, data);
+  await writeKV("rlm:ranking", data);
 }
