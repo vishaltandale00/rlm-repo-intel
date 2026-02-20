@@ -21,47 +21,94 @@ library docs, and best practices.
 Use `git_log(file_path, n=10)` to understand file history and change frequency.
 Use `git_blame(file_path)` to see who wrote specific code and when.
 
-Work in strict phases.
+Execute a strict 4 phase triage pipeline. Do not skip phases.
 
-Phase 1 Build deep codebase understanding
-- Read `repo_tree` to map the full architecture before scoring any pull request.
-- Identify critical modules, especially auth, gateway, config, data handling, agents, and channels.
-- Read key files from `repo` to learn coding patterns, conventions, interfaces, and coupling across modules.
-- Build a mental model of what matters most and which areas are highest risk if changed incorrectly.
-- Store this understanding in a REPL variable named `codebase_context` for reference in later phases.
+Phase 1 Broad metadata triage all open pull requests into about 300 candidates
+- Iterate every open pull request using metadata only.
+- Use only title, labels, changedFiles, additions, deletions, touched file paths, author activity, and linked issues.
+- Assign candidate_priority as 0, 1, 2, or 3.
+- Select about 300 candidates for deep analysis using critical path files, high blast radius, security labels, incident or regression patterns, and test removal signals.
+- Store selected candidates in `phase1_candidates`.
+- Also create `phase1_summary` with counts by reason tags and excluded volume.
+- Do not assign final scores in Phase 1.
 
-Phase 2 Contextual pull request analysis
-- Filter `prs` for state equal to open and analyze each open pull request.
-- Read each pull request `diff` to understand exactly what changed.
-- For each modified path, inspect the actual file from `repo` and explain its role in the system.
-- Assess whether the change follows established patterns and is consistent with codebase conventions.
-- Check for tests that cover modified behavior and whether the diff adds or updates tests.
-- Reason about downstream impact and dependency risk, including potential regressions in connected modules.
-- Cross reference with `issues` to determine whether the pull request addresses known problems.
+Phase 2 Deep code analysis for about 300 candidates
+- Read each candidate diff deeply and cross reference changed files with `repo`.
+- Analyze behavior changes, not only text changes.
+- Check tests added, tests updated, existing coverage, and missing failure path coverage.
+- Evaluate downstream impact and compatibility risk.
+- For each candidate, produce analysis_facts and analysis_inferences.
+- Evidence is mandatory with at least 3 references per pull request.
+- At least 1 evidence item must come from a diff changed file.
+- At least 1 evidence item must discuss testing coverage present or missing.
+- Store deep analysis records in `phase2_deep_analysis`.
 
-Phase 3 Score with justified reasoning
-- Score `urgency` as a float from 1.0 to 10.0 based on real operational impact and time sensitivity.
-- Score `quality` as a float from 1.0 to 10.0 based on code quality, consistency, tests, and error handling.
-- Set `state` to ready, needs_author_review, or triage based on quality, completeness, and review readiness.
-- Every score must include brief justification tied to specific code evidence from actual files.
-- Store each pull request result as a dict with:
-number, title, author, urgency, quality, state, justification, key_risks, verdict, evidence.
-- Ensure evidence includes concrete file paths.
+Phase 3 Precision scoring for about 300 deeply analyzed pull requests
+- Score urgency as float from 1.0 to 10.0.
+- Score quality as float from 1.0 to 10.0.
+- Score risk_if_merged as float from 1.0 to 10.0.
+- Score criticality as float from 1.0 to 10.0.
+- Compute final_score using:
+  final_score equals 0.35 times urgency plus 0.30 times quality plus 0.20 times criticality plus 0.15 times 10 minus risk_if_merged.
+- Keep final_score to two decimals.
+- Set state as ready, needs_author_review, or triage.
+- Set merge_recommendation as merge_now, merge_after_fixes, or hold.
+- If recommendation is not merge_now, must_fix_before_merge is required.
+- Justification is mandatory and must be 80 to 220 words with concrete file references.
+- Evidence is mandatory and each item includes file, reference_type, detail, and optional line_hint.
+- Store scored output in `phase3_scored`.
 
-Phase 4 Cross pull request synthesis
-- After all pull requests are scored, identify patterns across pull requests:
-related clusters, conflicting changes, and dependency chains.
-- Normalize scores so the distribution is meaningful and not inflated.
-- Produce a final ranked list.
+Phase 4 Elite curation and output assembly
+- Filter phase3_scored to final_score at least 9.0.
+- Sort by final_score descending, then urgency descending, then criticality descending.
+- Curate top list to 100 to 150 entries with hard cap 150 and target near 120.
+- If above 150, keep top 150 and record cutoff rationale.
+- If below 100, run a calibration pass and tie break review without fabricating evidence.
+- Store elite list in `top_prs`.
+- Store full scored set in `triage_results`.
+- Store run summary in `triage_summary`.
+- Every entry in top_prs must include elite_rank and final_score at least 9.0.
 
-Output requirements
-- Assign all final results to `triage_results` as a JSON list sorted by urgency descending.
-- After scoring each batch of PRs, call `push_partial_results(scored_prs_list)` to send
-  results to the live dashboard immediately. Do not wait until the end.
-- After each major step, call `push_trace_step(iteration, type, content)` to push
-  an incremental agent trace step.
-- Do not skip evidence. Do not rely on shallow heuristics.
-- Prioritize correctness over speed. This review influences software used at large scale.
+Required scored pull request fields in triage_results
+- pr_number
+- title
+- author
+- state
+- urgency
+- quality
+- risk_if_merged
+- criticality
+- final_score
+- merge_recommendation
+- justification
+- key_risks
+- must_fix_before_merge when recommendation is not merge_now
+- evidence as a list of structured evidence items
+
+Required triage_summary fields
+- total_open_prs_seen
+- phase1_candidates_count
+- deep_analyzed_count
+- scored_count
+- elite_count
+- score_distribution
+- validation_checks
+
+Anti shortcut and evidence policy
+- Do not score PRs from metadata alone beyond Phase 1.
+- Do not use keyword-only heuristics as final evidence.
+- Every score needs evidence with real file paths from repo dict.
+- Generic claims without file references are invalid.
+
+Validation gate
+- Before finalizing, verify all required fields are present and valid.
+- Reject any scored pull request missing justification, missing evidence, zero urgency, zero quality, or missing required fix list when recommendation is not merge_now.
+- If validation fails, set `validation_failed` with a defect list and do not finalize ranking.
+
+Execution behavior
+- After scoring each batch of pull requests, call `push_partial_results(scored_prs_list)` for live dashboard updates.
+- After each major step, call `push_trace_step(iteration, type, content)` for incremental trace updates.
+- Prioritize correctness over speed.
 
 {custom_tools_section}
 """.strip()

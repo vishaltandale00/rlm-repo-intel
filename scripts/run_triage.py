@@ -56,14 +56,54 @@ def _looks_like_triage_payload(value: Any) -> bool:
     return bool(required & first_keys)
 
 
-def _extract_triage_results_from_repl(rlm: Any) -> Any | None:
+def _looks_like_top_prs_payload(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    if not all(isinstance(item, dict) for item in value):
+        return False
+    required = {"pr_number", "number", "final_score", "elite_rank"}
+    first_keys = set(value[0].keys())
+    return bool(required & first_keys)
+
+
+def _looks_like_summary_payload(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required = {
+        "total_open_prs_seen",
+        "phase1_candidates_count",
+        "deep_analyzed_count",
+        "scored_count",
+        "elite_count",
+    }
+    return bool(required & set(value.keys()))
+
+
+def _repl_namespaces(rlm: Any) -> list[dict[str, Any]]:
     env = getattr(rlm, "_persistent_env", None)
-    # rlm LocalREPL keeps user variables in env.locals and reserved tools in env.globals.
+    if env is None:
+        return []
     namespaces: list[dict[str, Any]] = []
     for attr in ("locals", "namespace", "globals"):
         ns = getattr(env, attr, None)
         if isinstance(ns, dict):
             namespaces.append(ns)
+    return namespaces
+
+
+def _extract_repl_variable(rlm: Any, name: str, validator: Any | None = None) -> Any | None:
+    for ns in _repl_namespaces(rlm):
+        if name not in ns:
+            continue
+        value = ns[name]
+        if validator is None or validator(value):
+            return value
+    return None
+
+
+def _extract_triage_results_from_repl(rlm: Any) -> Any | None:
+    # rlm LocalREPL keeps user variables in env.locals and reserved tools in env.globals.
+    namespaces = _repl_namespaces(rlm)
     if not namespaces:
         return None
 
@@ -194,20 +234,41 @@ def _normalize_eval(raw: dict[str, Any]) -> dict[str, Any]:
     impact_scope = raw.get("impact_scope", raw.get("modules", []))
     linked_issues = raw.get("linked_issues", [])
 
+    urgency = _to_float(raw.get("urgency", raw.get("risk_score", raw.get("risk", 0.5))), 0.5)
+    quality = _to_float(raw.get("quality", raw.get("quality_score", 0.5)), 0.5)
+    risk_if_merged = _to_float(raw.get("risk_if_merged", raw.get("risk", raw.get("risk_score", 0.5))), 0.5)
+    criticality = _to_float(raw.get("criticality", raw.get("strategic_value", 0.5)), 0.5)
+    final_score = _to_float(
+        raw.get("final_score", raw.get("final_rank_score", raw.get("rank_score", raw.get("score", 0.0)))),
+        0.0,
+    )
+    justification = str(raw.get("justification", raw.get("review_summary", raw.get("summary", ""))))
+    evidence = _normalize_evidence(raw.get("evidence", []))
+    key_risks = [str(item) for item in _to_list(raw.get("key_risks", []))]
+    must_fix_before_merge = [str(item) for item in _to_list(raw.get("must_fix_before_merge", []))]
+    merge_recommendation = str(raw.get("merge_recommendation", raw.get("verdict", ""))).strip()
+
     normalized = {
         "pr_number": int(_to_float(pr_number, 0)),
         "title": str(title),
-        "risk_score": _to_float(raw.get("risk_score", raw.get("risk", raw.get("urgency", 0.5))), 0.5),
-        "quality_score": _to_float(raw.get("quality_score", raw.get("quality", 0.5)), 0.5),
-        "strategic_value": _to_float(raw.get("strategic_value", 0.5), 0.5),
+        "author": str(raw.get("author", "")),
+        "urgency": urgency,
+        "quality": quality,
+        "risk_if_merged": risk_if_merged,
+        "criticality": criticality,
+        "final_score": final_score,
+        "merge_recommendation": merge_recommendation,
+        "justification": justification,
+        "key_risks": key_risks,
+        "must_fix_before_merge": must_fix_before_merge,
+        "evidence": evidence,
+        "risk_score": urgency,
+        "quality_score": quality,
+        "strategic_value": criticality,
         "novelty_score": _to_float(raw.get("novelty_score", 0.5), 0.5),
         "test_alignment": _to_float(raw.get("test_alignment", 0.5), 0.5),
-        "final_rank_score": _to_float(
-            raw.get("final_rank_score", raw.get("rank_score", raw.get("score", 0.0))), 0.0
-        ),
-        "review_summary": str(
-            raw.get("review_summary", raw.get("summary", raw.get("reasoning", "")))
-        ),
+        "final_rank_score": final_score,
+        "review_summary": justification,
         "confidence": _to_float(raw.get("confidence", 0.5), 0.5),
         "impact_scope": [str(item) for item in _to_list(impact_scope)],
         "labels": _extract_labels(raw),
@@ -219,6 +280,32 @@ def _normalize_eval(raw: dict[str, Any]) -> dict[str, Any]:
         normalized["state"] = str(raw.get("state"))
 
     return normalized
+
+
+def _normalize_evidence(raw_evidence: Any) -> list[dict[str, Any]]:
+    evidence_items: list[dict[str, Any]] = []
+    for item in _to_list(raw_evidence):
+        if isinstance(item, dict):
+            evidence_items.append(
+                {
+                    "file": str(item.get("file", "")),
+                    "reference_type": str(item.get("reference_type", "")),
+                    "detail": str(item.get("detail", "")),
+                    "line_hint": str(item.get("line_hint", "")),
+                }
+            )
+            continue
+        if item is None:
+            continue
+        evidence_items.append(
+            {
+                "file": "",
+                "reference_type": "note",
+                "detail": str(item),
+                "line_hint": "",
+            }
+        )
+    return evidence_items
 
 
 def _build_summary(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
@@ -243,6 +330,35 @@ def _build_summary(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
         "average_final_rank_score": round(avg_rank, 4),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _normalize_summary(
+    triage_summary: dict[str, Any] | None,
+    evaluations: list[dict[str, Any]],
+    top_prs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    base = _build_summary(evaluations)
+    if not triage_summary:
+        return base
+
+    normalized = dict(base)
+    normalized.update(triage_summary)
+    normalized["total_prs_evaluated"] = int(
+        _to_float(
+            triage_summary.get(
+                "scored_count",
+                triage_summary.get("deep_analyzed_count", triage_summary.get("total_open_prs_seen", len(evaluations))),
+            ),
+            len(evaluations),
+        )
+    )
+    normalized["total_modules"] = int(_to_float(triage_summary.get("total_modules", 0), 0))
+    normalized["clusters"] = int(_to_float(triage_summary.get("clusters", 0), 0))
+    normalized["themes"] = [str(item) for item in _to_list(triage_summary.get("themes", []))]
+    if not normalized["themes"]:
+        normalized["themes"] = [f"elite_count:{len(top_prs)}"]
+    normalized["timestamp"] = datetime.now(timezone.utc).isoformat()
+    return normalized
 
 
 def _build_clusters(evaluations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -346,6 +462,35 @@ def _build_ranking(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _build_ranking_from_top_prs(top_prs: list[dict[str, Any]]) -> dict[str, Any]:
+    ranking_view: list[dict[str, Any]] = []
+
+    for index, item in enumerate(top_prs, start=1):
+        pr_number = int(_to_float(item.get("pr_number", item.get("number", 0)), 0))
+        if pr_number <= 0:
+            continue
+        elite_rank = int(_to_float(item.get("elite_rank", index), index))
+        final_score = _to_float(item.get("final_score", item.get("score", 0.0)), 0.0)
+        reason = str(item.get("justification", item.get("review_summary", ""))).strip()
+        if not reason:
+            reason = f"final_score={final_score:.2f}"
+        ranking_view.append(
+            {
+                "number": pr_number,
+                "rank": elite_rank,
+                "reason": reason,
+                "score": final_score,
+            }
+        )
+
+    ranking_view.sort(key=lambda item: item["rank"])
+    return {
+        "ranking": ranking_view,
+        "total_evaluated": len(ranking_view),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def _parse_trace_steps(raw_text: str) -> list[dict[str, Any]]:
     text = raw_text.strip()
     if not text:
@@ -420,15 +565,50 @@ def main():
     print("Creating frontier RLM...")
     rlm = create_frontier_rlm(config)
 
-    prompt = "Analyze ALL open PRs. Filter prs for state=='open'. Score each for urgency (1-10) and quality (1-10), assign a state (ready/needs_author_review/triage), and produce the full triage JSON list. Use the diff field on each PR for deep code analysis. Store results in triage_results as a JSON list."
+    prompt = "Execute the full 4-phase triage pipeline. Phase 1: scan all open PRs by metadata, select ~300 candidates. Phase 2: deep code analysis on candidates. Phase 3: precision scoring with evidence. Phase 4: curate top 100-150 elite PRs with final_score >= 9.0. Store results in triage_results, top_prs, and triage_summary."
 
     print(f"Running RLM with prompt: {prompt}")
     print("=" * 80)
 
     result = rlm.completion(prompt)
     response_text = _extract_response_text(result)
-    repl_payload = _extract_triage_results_from_repl(rlm)
-    result_payload = repl_payload if repl_payload is not None else _parse_result_payload(result)
+    result_payload = _parse_result_payload(result)
+
+    repl_triage_results = _extract_repl_variable(rlm, "triage_results", _looks_like_triage_payload)
+    repl_top_prs = _extract_repl_variable(rlm, "top_prs", _looks_like_top_prs_payload)
+    repl_triage_summary = _extract_repl_variable(rlm, "triage_summary", _looks_like_summary_payload)
+
+    triage_results_payload = repl_triage_results
+    top_prs_payload = repl_top_prs
+    triage_summary_payload = repl_triage_summary
+
+    if isinstance(result_payload, dict):
+        if triage_results_payload is None and _looks_like_triage_payload(result_payload.get("triage_results")):
+            triage_results_payload = result_payload.get("triage_results")
+        if top_prs_payload is None and _looks_like_top_prs_payload(result_payload.get("top_prs")):
+            top_prs_payload = result_payload.get("top_prs")
+        if triage_summary_payload is None and _looks_like_summary_payload(result_payload.get("triage_summary")):
+            triage_summary_payload = result_payload.get("triage_summary")
+
+    if triage_results_payload is None:
+        fallback_payload = _extract_triage_results_from_repl(rlm)
+        if fallback_payload is not None:
+            triage_results_payload = fallback_payload
+
+    if triage_results_payload is None:
+        triage_results_payload = _find_eval_candidates(result_payload)
+
+    if top_prs_payload is None and isinstance(triage_results_payload, list):
+        scored = [item for item in triage_results_payload if isinstance(item, dict)]
+        scored.sort(key=lambda item: _to_float(item.get("final_score", item.get("score", 0.0)), 0.0), reverse=True)
+        top_prs_payload = scored[:150]
+
+    output_bundle = {
+        "triage_results": triage_results_payload,
+        "top_prs": top_prs_payload,
+        "triage_summary": triage_summary_payload,
+        "raw_response": result_payload,
+    }
 
     print("=" * 80)
     print("RLM RESULT:")
@@ -441,10 +621,10 @@ def main():
     trace_path.write_text(response_text)
 
     try:
-        if isinstance(result_payload, (dict, list)):
-            output_path.write_text(json.dumps(result_payload, indent=2))
+        if isinstance(output_bundle, (dict, list)):
+            output_path.write_text(json.dumps(output_bundle, indent=2))
         else:
-            output_path.write_text(str(result_payload))
+            output_path.write_text(str(output_bundle))
     except (json.JSONDecodeError, TypeError):
         output_path.write_text(str(result))
 
@@ -457,9 +637,14 @@ def main():
         print("DATABASE_URL not set, skipping dashboard push.")
         return
 
-    evaluations_raw = _find_eval_candidates(result_payload)
-    evaluations = [_normalize_eval(item) for item in evaluations_raw]
-    summary = _build_summary(evaluations)
+    evaluations_raw = _to_list(triage_results_payload)
+    evaluations = [_normalize_eval(item) for item in evaluations_raw if isinstance(item, dict)]
+    top_prs_raw = _to_list(top_prs_payload)
+    summary = _normalize_summary(
+        triage_summary_payload if isinstance(triage_summary_payload, dict) else None,
+        evaluations,
+        top_prs_raw,
+    )
 
     try:
         for evaluation in evaluations:
@@ -470,7 +655,7 @@ def main():
         print(f"Dashboard push failed: {exc}. Local backup is still saved.")
 
     clusters = _build_clusters(evaluations)
-    ranking = _build_ranking(evaluations)
+    ranking = _build_ranking_from_top_prs(top_prs_raw) if top_prs_raw else _build_ranking(evaluations)
 
     try:
         push_clusters(clusters)
