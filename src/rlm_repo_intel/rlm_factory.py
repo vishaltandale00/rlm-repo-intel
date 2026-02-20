@@ -1,53 +1,44 @@
 """Factory for creating RLM instances with proper API key handling."""
 
-import os
 from typing import Any
 
 from rich.console import Console
 
+from rlm_repo_intel.pipeline.rlm_session import _patch_rlm_litellm_kwargs_passthrough
+
 console = Console()
 
 
-def _infer_backend(model_name: str) -> str:
-    model = model_name.lower()
-    if model.startswith("claude"):
-        return "anthropic"
-    if model.startswith("gemini"):
-        return "gemini"
-    return "openai"
+_patch_rlm_litellm_kwargs_passthrough()
 
 
-def _get_api_key(backend: str) -> str | None:
-    """Get API key for a backend from environment."""
-    key_map = {
-        "openai": "OPENAI_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-        "gemini": "GOOGLE_API_KEY",
-        "google": "GOOGLE_API_KEY",
-    }
-    env_var = key_map.get(backend, "")
-    return os.environ.get(env_var)
+def _to_litellm_model_name(model_name: str) -> str:
+    model = model_name.strip()
+    lower = model.lower()
+    if lower.startswith("anthropic/") or lower.startswith("gemini/"):
+        return model
+    if lower.startswith("claude"):
+        return f"anthropic/{model}"
+    if lower.startswith("gemini"):
+        return f"gemini/{model}"
+    return model
 
 
 def create_rlm(model_name: str, verbose: bool = False, **extra_kwargs) -> Any:
-    """Create an RLM instance with proper backend detection and API key injection.
-    
-    The rlms library requires api_key as an explicit kwarg for Anthropic/Gemini.
-    This factory handles that automatically.
-    """
+    """Create an RLM instance via LiteLLM backend."""
     from rlm import RLM
 
-    backend = _infer_backend(model_name)
-    api_key = _get_api_key(backend)
+    litellm_model_name = _to_litellm_model_name(model_name)
+    backend_kwargs: dict[str, Any] = {"model_name": litellm_model_name}
 
-    backend_kwargs: dict[str, Any] = {"model_name": model_name}
-    if api_key:
-        backend_kwargs["api_key"] = api_key
+    canonical_model = litellm_model_name.split("/", 1)[-1].lower()
+    if canonical_model == "claude-sonnet-4-6":
+        backend_kwargs["extra_headers"] = {"anthropic-beta": "context-1m-2025-08-07"}
 
     backend_kwargs.update(extra_kwargs)
 
     return RLM(
-        backend=backend,
+        backend="litellm",
         backend_kwargs=backend_kwargs,
         verbose=verbose,
     )
