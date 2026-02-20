@@ -8,6 +8,7 @@ from typing import Any
 from rlm.utils.token_utils import MODEL_CONTEXT_LIMITS
 MODEL_CONTEXT_LIMITS["claude-sonnet-4"] = 1_000_000
 MODEL_CONTEXT_LIMITS["claude-sonnet-4-20250514"] = 1_000_000
+MODEL_CONTEXT_LIMITS["claude-sonnet-4-6"] = 1_000_000
 
 from rlm import RLM
 
@@ -65,7 +66,7 @@ def create_frontier_rlm(config: dict[str, Any], run_id: str | None = None) -> RL
 
     return RLM(
         backend="litellm",
-        backend_kwargs={"model_name": "anthropic/claude-sonnet-4-20250514"},
+        backend_kwargs={"model_name": "anthropic/claude-sonnet-4-6"},
         custom_system_prompt=prompt_with_tables,
         custom_tools=custom_tools,
         custom_sub_tools={},  # sub-agents get no tools, just llm_query

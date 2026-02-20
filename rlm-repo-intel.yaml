@@ -4,11 +4,11 @@ repo:
   branch: main
 
 models:
-  root: claude-sonnet-4-20250514            # orchestrator — decides decomposition strategy
-  code_worker: claude-sonnet-4-20250514    # code analysis — understands diffs, contracts
-  reasoning_worker: claude-sonnet-4-20250514  # plan worker — cross-PR reasoning
-  cheap_worker: claude-sonnet-4-20250514   # bulk processing — individual PR scoring
-  reviewer: claude-sonnet-4-20250514       # adversarial reviewer — challenges other agents' work
+  root: claude-sonnet-4-6            # orchestrator — decides decomposition strategy
+  code_worker: claude-sonnet-4-6    # code analysis — understands diffs, contracts
+  reasoning_worker: claude-sonnet-4-6  # plan worker — cross-PR reasoning
+  cheap_worker: claude-sonnet-4-6   # bulk processing — individual PR scoring
+  reviewer: claude-sonnet-4-6       # adversarial reviewer — challenges other agents' work
 
 budget:
   max_spend_usd: 2000
