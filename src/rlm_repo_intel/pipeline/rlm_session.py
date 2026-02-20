@@ -16,7 +16,7 @@ def create_frontier_rlm(config: dict[str, Any]) -> RLM:
     custom_tools = {**github_tools, "repo": repo, "repo_tree": repo_tree}
     return RLM(
         backend="litellm",
-        backend_kwargs={"model_name": "claude-sonnet-4.6"},
+        backend_kwargs={"model_name": "anthropic/claude-sonnet-4-20250514"},
         custom_system_prompt=ROOT_FRONTIER_PROMPT,
         custom_tools=custom_tools,
         custom_sub_tools=github_tools,

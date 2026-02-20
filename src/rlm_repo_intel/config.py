@@ -54,9 +54,14 @@ def load_config(path: str) -> dict:
             user_config = yaml.safe_load(f) or {}
         _deep_merge(config, user_config)
 
-    # Ensure data directories exist
+    # Resolve paths to absolute (relative to config file's parent or cwd)
+    base_dir = config_path.resolve().parent if config_path.exists() else Path.cwd()
     for key in ["data_dir", "repo_dir", "graph_dir", "results_dir"]:
-        Path(config["paths"][key]).mkdir(parents=True, exist_ok=True)
+        p = Path(config["paths"][key])
+        if not p.is_absolute():
+            p = base_dir / p
+        config["paths"][key] = str(p.resolve())
+        p.mkdir(parents=True, exist_ok=True)
 
     return config
 
