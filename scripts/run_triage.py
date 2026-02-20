@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,7 +14,12 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from rlm_repo_intel.config import load_config
-from rlm_repo_intel.dashboard_push import push_evaluation, push_summary
+from rlm_repo_intel.dashboard_push import (
+    push_clusters,
+    push_evaluation,
+    push_ranking,
+    push_summary,
+)
 from rlm_repo_intel.pipeline.rlm_session import create_frontier_rlm
 
 
@@ -44,6 +50,65 @@ def _to_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
     return []
+
+
+def _normalize_score(score: Any) -> float:
+    numeric = _to_float(score, 0.0)
+    if numeric > 1.0:
+        numeric = numeric / 10.0
+    if numeric < 0.0:
+        return 0.0
+    if numeric > 1.0:
+        return 1.0
+    return numeric
+
+
+def _extract_labels(raw: dict[str, Any]) -> list[str]:
+    labels = raw.get("labels", raw.get("tags", []))
+    items = _to_list(labels)
+    normalized: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            label = item.get("name")
+            if label:
+                normalized.append(str(label).strip().lower())
+        elif item is not None:
+            normalized.append(str(item).strip().lower())
+    return [label for label in normalized if label]
+
+
+def _extract_module_prefixes(impact_scope: list[str]) -> list[str]:
+    prefixes: list[str] = []
+    for item in impact_scope:
+        value = item.strip()
+        if not value:
+            continue
+        if "/" in value:
+            prefix = value.split("/", 1)[0]
+        elif ":" in value:
+            prefix = value.split(":", 1)[0]
+        else:
+            prefix = value.split(".", 1)[0]
+        prefix = prefix.strip().lower()
+        if prefix:
+            prefixes.append(prefix)
+    return prefixes
+
+
+def _extract_title_theme(title: str) -> str | None:
+    text = title.strip().lower()
+    if not text:
+        return None
+
+    conventional = re.match(r"^([a-z]+)\(([^)]+)\)", text)
+    if conventional:
+        return f"{conventional.group(1)}({conventional.group(2)})"
+
+    fallback = re.match(r"^([a-z]+)[:\\s\\-_/]+([a-z0-9_\\-/]+)", text)
+    if fallback:
+        return f"{fallback.group(1)}({fallback.group(2).split('/')[0]})"
+
+    return None
 
 
 def _find_eval_candidates(obj: Any) -> list[dict[str, Any]]:
@@ -92,6 +157,7 @@ def _normalize_eval(raw: dict[str, Any]) -> dict[str, Any]:
         ),
         "confidence": _to_float(raw.get("confidence", 0.5), 0.5),
         "impact_scope": [str(item) for item in _to_list(impact_scope)],
+        "labels": _extract_labels(raw),
         "linked_issues": [int(_to_float(item, 0)) for item in _to_list(linked_issues)],
         "agent_traces": raw.get("agent_traces", raw.get("agent_outputs", {})),
     }
@@ -122,6 +188,84 @@ def _build_summary(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
         "average_risk_score": round(avg_risk, 4),
         "average_quality_score": round(avg_quality, 4),
         "average_final_rank_score": round(avg_rank, 4),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _build_clusters(evaluations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    clusters: dict[str, dict[str, Any]] = {}
+
+    def add_cluster(name: str, theme: str, pr_number: int) -> None:
+        existing = clusters.get(name)
+        if existing is None:
+            clusters[name] = {"name": name, "pr_numbers": {pr_number}, "theme": theme}
+            return
+        existing["pr_numbers"].add(pr_number)
+
+    for ev in evaluations:
+        pr_number = int(_to_float(ev.get("pr_number"), 0))
+        if pr_number <= 0:
+            continue
+
+        for label in _to_list(ev.get("labels")):
+            label_text = str(label).strip().lower()
+            if label_text:
+                add_cluster(f"label:{label_text}", f"label '{label_text}'", pr_number)
+
+        impact_scope = [str(item) for item in _to_list(ev.get("impact_scope"))]
+        for prefix in _extract_module_prefixes(impact_scope):
+            add_cluster(f"module:{prefix}", f"module '{prefix}'", pr_number)
+
+        title_theme = _extract_title_theme(str(ev.get("title", "")))
+        if title_theme:
+            add_cluster(f"title:{title_theme}", f"title pattern '{title_theme}'", pr_number)
+
+    result: list[dict[str, Any]] = []
+    for cluster in clusters.values():
+        pr_numbers = sorted(cluster["pr_numbers"])
+        if len(pr_numbers) < 2:
+            continue
+        result.append(
+            {
+                "name": cluster["name"],
+                "pr_numbers": pr_numbers,
+                "theme": cluster["theme"],
+                "count": len(pr_numbers),
+            }
+        )
+
+    result.sort(key=lambda item: item["count"], reverse=True)
+    return result
+
+
+def _build_ranking(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
+    ranking_items: list[dict[str, Any]] = []
+
+    for ev in evaluations:
+        final_rank_score = _to_float(ev.get("final_rank_score"), 0.0)
+        if final_rank_score > 0.0:
+            rank_score = _normalize_score(final_rank_score)
+        else:
+            urgency = _normalize_score(ev.get("risk_score"))
+            quality = _normalize_score(ev.get("quality_score"))
+            rank_score = round((urgency * 0.6) + (quality * 0.4), 4)
+
+        ranking_items.append(
+            {
+                "pr_number": ev.get("pr_number"),
+                "title": ev.get("title"),
+                "rank_score": rank_score,
+                "urgency": _normalize_score(ev.get("risk_score")),
+                "quality": _normalize_score(ev.get("quality_score")),
+                "state": ev.get("state", "unknown"),
+            }
+        )
+
+    ranking_items.sort(key=lambda item: item["rank_score"], reverse=True)
+    top_50 = ranking_items[:50]
+    return {
+        "ranking": top_50,
+        "total_evaluated": len(evaluations),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -173,6 +317,18 @@ def main():
         print(f"Pushed {len(evaluations)} evaluations and summary to dashboard DB.")
     except Exception as exc:
         print(f"Dashboard push failed: {exc}. Local backup is still saved.")
+
+    clusters = _build_clusters(evaluations)
+    ranking = _build_ranking(evaluations)
+
+    try:
+        push_clusters(clusters)
+        push_ranking(ranking)
+        print(
+            f"Pushed {len(clusters)} clusters and {len(ranking.get('ranking', []))} ranked PRs to dashboard DB."
+        )
+    except Exception as exc:
+        print(f"Dashboard cluster/ranking push failed: {exc}. Local backup is still saved.")
 
 
 if __name__ == "__main__":
