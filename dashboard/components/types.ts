@@ -14,13 +14,21 @@ export interface AgentTraces {
 export interface EvaluationItem {
   pr_number: number;
   title: string;
-  risk_score: number;
-  quality_score: number;
-  strategic_value: number;
-  final_rank_score: number;
-  review_summary: string;
-  confidence: number;
-  impact_scope: string[];
+  state?: "ready" | "needs_author_review" | "triage" | string;
+  author?: string;
+  urgency?: number;
+  quality?: number;
+  justification?: string;
+  key_risks?: string[] | string;
+  verdict?: string;
+  evidence?: string[] | string;
+  risk_score?: number;
+  quality_score?: number;
+  strategic_value?: number;
+  final_rank_score?: number;
+  review_summary?: string;
+  confidence?: number;
+  impact_scope?: string[];
   novelty_score?: number;
   agent_traces?: AgentTraces;
 }

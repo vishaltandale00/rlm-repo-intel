@@ -12,7 +12,8 @@ import {
   RankingData,
   SummaryData,
 } from "@/components/types";
-import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
 
 interface DashboardClientProps {
   summary: SummaryData | null;
@@ -28,12 +29,29 @@ function formatTraceTime(timestamp: string) {
 }
 
 export function DashboardClient({ summary, evaluations, clusters, ranking, trace }: DashboardClientProps) {
+  const router = useRouter();
   const firstTracePR = useMemo(
-    () => evaluations.find((evaluation) => evaluation.agent_traces)?.pr_number ?? null,
+    () =>
+      evaluations.find((evaluation) => evaluation.agent_traces)?.pr_number ??
+      evaluations[0]?.pr_number ??
+      null,
     [evaluations]
   );
 
   const [selectedPR, setSelectedPR] = useState<number | null>(firstTracePR);
+
+  useEffect(() => {
+    if (selectedPR === null && firstTracePR !== null) {
+      setSelectedPR(firstTracePR);
+    }
+  }, [firstTracePR, selectedPR]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      router.refresh();
+    }, 15000);
+    return () => window.clearInterval(id);
+  }, [router]);
 
   return (
     <div className="grid gap-6">
