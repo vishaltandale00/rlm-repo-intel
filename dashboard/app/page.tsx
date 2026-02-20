@@ -1,5 +1,5 @@
 import { DashboardClient } from "@/components/dashboard-client";
-import { EvaluationItem } from "@/components/types";
+import { EvaluationItem, RunMeta } from "@/components/types";
 import {
   getAgentTrace,
   getClusters,
@@ -36,6 +36,8 @@ function normalizeEvaluation(raw: unknown): EvaluationItem | null {
   const strategicValue = toNumber(item.strategic_value) ?? urgency;
   const finalRankScore =
     toNumber(item.final_rank_score) ??
+    toNumber(item.final_score) ??
+    toNumber(item.score) ??
     (urgency !== undefined && quality !== undefined ? (urgency + quality) / 2 : undefined);
 
   return {
@@ -50,6 +52,7 @@ function normalizeEvaluation(raw: unknown): EvaluationItem | null {
     quality_score: qualityScore,
     strategic_value: strategicValue,
     final_rank_score: finalRankScore,
+    final_score: toNumber(item.final_score) ?? finalRankScore,
     review_summary:
       typeof item.review_summary === "string"
         ? item.review_summary
@@ -80,6 +83,44 @@ function normalizeEvaluation(raw: unknown): EvaluationItem | null {
   };
 }
 
+function normalizeRunMeta(raw: unknown, fallbackRunId: string | null): RunMeta | null {
+  if (!raw || typeof raw !== "object") return null;
+  const item = raw as Record<string, unknown>;
+  const tokenInput = toNumber(item.token_input) ?? toNumber(item.input_tokens);
+  const tokenOutput = toNumber(item.token_output) ?? toNumber(item.output_tokens);
+  const totalTokens = toNumber(item.total_tokens) ?? toNumber(item.tokens_used);
+  const computedTotalTokens =
+    totalTokens ?? (tokenInput !== undefined || tokenOutput !== undefined ? (tokenInput ?? 0) + (tokenOutput ?? 0) : undefined);
+
+  const costUsd = toNumber(item.cost_usd) ?? toNumber(item.total_cost_usd) ?? toNumber(item.cost);
+
+  return {
+    ...item,
+    id: typeof item.id === "string" ? item.id : fallbackRunId ?? "legacy",
+    timestamp:
+      typeof item.timestamp === "string"
+        ? item.timestamp
+        : typeof item.started_at === "string"
+          ? item.started_at
+          : typeof item.start_time === "string"
+            ? item.start_time
+            : new Date().toISOString(),
+    prompt_hash: typeof item.prompt_hash === "string" ? item.prompt_hash : undefined,
+    prompt_version: typeof item.prompt_version === "string" ? item.prompt_version : undefined,
+    model_name: typeof item.model_name === "string" ? item.model_name : undefined,
+    model_root: typeof item.model_root === "string" ? item.model_root : undefined,
+    started_at: typeof item.started_at === "string" ? item.started_at : undefined,
+    start_time: typeof item.start_time === "string" ? item.start_time : undefined,
+    token_input: tokenInput,
+    token_output: tokenOutput,
+    total_tokens: computedTotalTokens,
+    tokens_used: computedTotalTokens,
+    cost_usd: costUsd,
+    total_cost_usd: costUsd,
+    cost: costUsd,
+  };
+}
+
 async function getData(selectedRunId: string | null) {
   const [summary, evaluations, clusters, ranking, trace, runMeta] = await Promise.all([
     getSummary(selectedRunId),
@@ -87,14 +128,21 @@ async function getData(selectedRunId: string | null) {
     getClusters(selectedRunId),
     getRanking(selectedRunId),
     getAgentTrace(selectedRunId),
-    selectedRunId ? getRunMeta(selectedRunId) : Promise.resolve(null),
+    getRunMeta(selectedRunId ?? "latest"),
   ]);
 
   const normalizedEvaluations = Array.isArray(evaluations)
     ? evaluations.map(normalizeEvaluation).filter((value): value is EvaluationItem => Boolean(value))
     : [];
 
-  return { summary, evaluations: normalizedEvaluations, clusters, ranking, trace, runMeta };
+  return {
+    summary,
+    evaluations: normalizedEvaluations,
+    clusters,
+    ranking,
+    trace,
+    runMeta: normalizeRunMeta(runMeta, selectedRunId),
+  };
 }
 
 type HomeProps = {

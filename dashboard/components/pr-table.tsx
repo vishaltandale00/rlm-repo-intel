@@ -16,22 +16,45 @@ function scoreColor(score: number) {
   return "text-red-300";
 }
 
+function scoreBadgeStyle(score?: number) {
+  if (score === undefined || Number.isNaN(score)) return "border-neutral-700 bg-neutral-900 text-neutral-400";
+  return `border-transparent text-black`;
+}
+
+function scoreBadgeColor(score?: number) {
+  if (score === undefined || Number.isNaN(score)) return undefined;
+  const clamped = Math.max(0, Math.min(10, score));
+  const hue = Math.round((clamped / 10) * 120);
+  return { backgroundColor: `hsl(${hue} 85% 60%)` };
+}
+
 function ScoreBadge({ score, label }: { score?: number; label: string }) {
   if (score === undefined || Number.isNaN(score)) {
-    return (
-      <div className="text-center">
-        <div className="font-mono text-xs font-bold text-neutral-400">--</div>
-        <div className="text-[10px] uppercase tracking-wide text-neutral-500">{label}</div>
-      </div>
-    );
+    return <span className="inline-flex min-w-12 justify-center rounded border border-neutral-700 bg-neutral-900 px-2 py-1 font-mono text-xs text-neutral-400">--</span>;
   }
 
   return (
-    <div className="text-center">
-      <div className={`font-mono text-xs font-bold ${scoreColor(score)}`}>{score.toFixed(1)}</div>
-      <div className="text-[10px] uppercase tracking-wide text-neutral-500">{label}</div>
-    </div>
+    <span
+      className={`inline-flex min-w-12 justify-center rounded border px-2 py-1 font-mono text-xs font-semibold ${scoreBadgeStyle(score)} ${scoreColor(score)}`}
+      style={scoreBadgeColor(score)}
+      aria-label={`${label} score ${score.toFixed(1)}`}
+    >
+      {score.toFixed(1)}
+    </span>
   );
+}
+
+function stateBadgeClass(state?: string) {
+  switch (state) {
+    case "ready":
+      return "bg-emerald-900/40 text-emerald-200 border-emerald-500/40";
+    case "needs_author_review":
+      return "bg-amber-900/40 text-amber-200 border-amber-500/40";
+    case "triage":
+      return "bg-neutral-800 text-neutral-200 border-neutral-600";
+    default:
+      return "bg-neutral-900 text-neutral-300 border-neutral-700";
+  }
 }
 
 export function PRTable({ evaluations, ranking, selectedPR, onSelectPR }: PRTableProps) {
@@ -103,48 +126,75 @@ export function PRTable({ evaluations, ranking, selectedPR, onSelectPR }: PRTabl
         <div className="self-center text-right text-xs text-neutral-400">{filtered.length} PRs</div>
       </div>
 
-      {filtered.slice(0, 50).map((ev, i) => {
-        const rankEntry = ranking?.ranking?.find((r) => r.number === ev.pr_number);
-        const isSelected = selectedPR === ev.pr_number;
-        const urgency = ev.urgency ?? ev.risk_score;
-        const quality = ev.quality ?? ev.quality_score;
-        const rank = ev.final_rank_score ?? (urgency !== undefined && quality !== undefined ? (urgency + quality) / 2 : undefined);
+      <div className="overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--card)]">
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead className="bg-neutral-900/70 text-left text-xs uppercase tracking-wide text-neutral-400">
+              <tr>
+                <th className="px-3 py-2">PR#</th>
+                <th className="px-3 py-2">Title</th>
+                <th className="px-3 py-2 text-center">Urgency</th>
+                <th className="px-3 py-2 text-center">Quality</th>
+                <th className="px-3 py-2 text-center">Final Score</th>
+                <th className="px-3 py-2">State</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.slice(0, 50).map((ev) => {
+                const rankEntry = ranking?.ranking?.find((r) => r.number === ev.pr_number);
+                const isSelected = selectedPR === ev.pr_number;
+                const urgency = ev.urgency ?? ev.risk_score;
+                const quality = ev.quality ?? ev.quality_score;
+                const rank =
+                  ev.final_score ??
+                  ev.final_rank_score ??
+                  (urgency !== undefined && quality !== undefined ? (urgency + quality) / 2 : undefined);
 
-        return (
-          <button
-            key={ev.pr_number}
-            type="button"
-            className={`w-full rounded-lg border px-3 py-3 text-left transition-colors ${
-              isSelected
-                ? "border-blue-500/70 bg-blue-500/10"
-                : "border-[var(--border)] bg-[var(--card)] hover:border-blue-500/40"
-            }`}
-            onClick={() => onSelectPR(ev.pr_number)}
-          >
-            <div className="flex items-center justify-between gap-4">
-              <div className="min-w-0">
-                <div className="text-xs text-neutral-500">Top #{i + 1}</div>
-                <div className="truncate text-sm text-neutral-200">
-                  <span className="font-mono text-blue-300">PR #{ev.pr_number}</span> {ev.title}
-                </div>
-                <div className="mt-1 flex items-center gap-2 text-[11px] text-neutral-400">
-                  <span className="rounded bg-neutral-900 px-1.5 py-0.5">{ev.state || "unknown"}</span>
-                  {ev.author ? <span>by {ev.author}</span> : null}
-                </div>
-                {rankEntry?.reason && (
-                  <div className="mt-1 truncate text-xs text-emerald-300/80">{rankEntry.reason}</div>
-                )}
-              </div>
-              <div className="flex shrink-0 gap-3">
-                <ScoreBadge score={rank} label="rank" />
-                <ScoreBadge score={urgency} label="urgency" />
-                <ScoreBadge score={quality} label="quality" />
-                <ScoreBadge score={ev.strategic_value} label="value" />
-              </div>
-            </div>
-          </button>
-        );
-      })}
+                return (
+                  <tr
+                    key={ev.pr_number}
+                    className={`cursor-pointer border-t border-neutral-800 text-neutral-200 transition-colors ${
+                      isSelected ? "bg-blue-500/10" : "hover:bg-neutral-900/60"
+                    }`}
+                    onClick={() => onSelectPR(ev.pr_number)}
+                  >
+                    <td className="px-3 py-2 align-top">
+                      <a
+                        href={`https://github.com/openclaw/openclaw/pull/${ev.pr_number}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="font-mono text-blue-300 hover:underline"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        #{ev.pr_number}
+                      </a>
+                    </td>
+                    <td className="max-w-xl px-3 py-2 align-top">
+                      <div className="truncate" title={ev.title}>{ev.title}</div>
+                      {ev.author ? <div className="text-xs text-neutral-500">by {ev.author}</div> : null}
+                      {rankEntry?.reason ? <div className="truncate text-xs text-emerald-300/80">{rankEntry.reason}</div> : null}
+                    </td>
+                    <td className="px-3 py-2 text-center align-top">
+                      <ScoreBadge score={urgency} label="urgency" />
+                    </td>
+                    <td className="px-3 py-2 text-center align-top">
+                      <ScoreBadge score={quality} label="quality" />
+                    </td>
+                    <td className="px-3 py-2 text-center align-top">
+                      <ScoreBadge score={rank} label="final score" />
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <span className={`inline-flex rounded border px-2 py-1 text-xs ${stateBadgeClass(ev.state)}`}>
+                        {ev.state || "unknown"}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
       {filtered.length === 0 && <div className="text-neutral-500">No PRs match the current filters.</div>}
     </div>
   );

@@ -26,6 +26,7 @@ export interface EvaluationItem {
   quality_score?: number;
   strategic_value?: number;
   final_rank_score?: number;
+  final_score?: number;
   review_summary?: string;
   confidence?: number;
   impact_scope?: string[];
@@ -94,7 +95,11 @@ export interface RunMeta {
   time_elapsed_seconds?: number;
   token_input?: number;
   token_output?: number;
+  total_tokens?: number;
+  tokens_used?: number;
   cost_usd?: number;
+  cost?: number;
+  total_cost_usd?: number;
   total_prs_seen?: number;
   total_prs_scored?: number;
 }

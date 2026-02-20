@@ -31,6 +31,85 @@ interface DashboardClientProps {
   trace: AgentTraceStep[];
 }
 
+function formatDate(value?: string): string {
+  if (!value) return "n/a";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+}
+
+function readTokenCount(meta: RunMeta | null): number | null {
+  if (!meta) return null;
+  const direct = meta.tokens_used ?? meta.total_tokens;
+  if (typeof direct === "number") return direct;
+  const hasInput = typeof meta.token_input === "number";
+  const hasOutput = typeof meta.token_output === "number";
+  if (!hasInput && !hasOutput) return null;
+  return (meta.token_input ?? 0) + (meta.token_output ?? 0);
+}
+
+function readCost(meta: RunMeta | null): number | null {
+  if (!meta) return null;
+  const cost = meta.cost_usd ?? meta.total_cost_usd ?? meta.cost;
+  return typeof cost === "number" ? cost : null;
+}
+
+function RunInfo({
+  selectedRunId,
+  selectedRunMeta,
+  evaluationsCount,
+}: {
+  selectedRunId: string | null;
+  selectedRunMeta: RunMeta | null;
+  evaluationsCount: number;
+}) {
+  const promptVersion = selectedRunMeta?.prompt_hash?.slice(0, 12) ?? selectedRunMeta?.prompt_version ?? "n/a";
+  const model = selectedRunMeta?.model_name ?? selectedRunMeta?.model_root ?? "n/a";
+  const start = selectedRunMeta?.started_at ?? selectedRunMeta?.start_time ?? selectedRunMeta?.timestamp;
+  const tokens = readTokenCount(selectedRunMeta);
+  const cost = readCost(selectedRunMeta);
+
+  return (
+    <section className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-4 py-3">
+      <div className="grid gap-3 text-xs md:grid-cols-6">
+        <div>
+          <div className="text-neutral-500 uppercase tracking-wide">Run ID</div>
+          <div className="font-mono text-neutral-200">{selectedRunId ?? "none"}</div>
+        </div>
+        <div>
+          <div className="text-neutral-500 uppercase tracking-wide">Prompt Version</div>
+          <div className="font-mono text-blue-300">{promptVersion}</div>
+        </div>
+        <div>
+          <div className="text-neutral-500 uppercase tracking-wide">Model</div>
+          <div className="font-mono text-neutral-200">{model}</div>
+        </div>
+        <div>
+          <div className="text-neutral-500 uppercase tracking-wide">Start Time</div>
+          <div className="font-mono text-neutral-200">{formatDate(start)}</div>
+        </div>
+        <div>
+          <div className="text-neutral-500 uppercase tracking-wide">Tokens Used</div>
+          <div className="font-mono text-neutral-200">{tokens !== null ? tokens.toLocaleString() : "n/a"}</div>
+        </div>
+        <div>
+          <div className="text-neutral-500 uppercase tracking-wide">Cost</div>
+          <div className="font-mono text-neutral-200">{cost !== null ? `$${cost.toFixed(2)}` : "n/a"}</div>
+        </div>
+        <div>
+          <div className="text-neutral-500 uppercase tracking-wide">PRs Analyzed</div>
+          <div className="font-mono text-neutral-200">
+            {selectedRunMeta?.total_prs_scored ?? selectedRunMeta?.total_prs_seen ?? evaluationsCount}
+          </div>
+        </div>
+        <div>
+          <div className="text-neutral-500 uppercase tracking-wide">Elapsed</div>
+          <div className="font-mono text-neutral-200">{formatElapsed(selectedRunMeta)}</div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function formatTraceTime(timestamp: string) {
   const date = new Date(timestamp);
   return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString();
@@ -154,73 +233,9 @@ export function DashboardClient({
   return (
     <div className="grid gap-6">
       <RunSelector runs={runs} selectedRunId={selectedRunId} />
-
-      <section className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-4 py-3">
-        <div className="grid gap-3 text-xs md:grid-cols-4">
-          <div>
-            <div className="text-neutral-500 uppercase tracking-wide">Run ID</div>
-            <div className="font-mono text-neutral-200">{selectedRunId ?? "none"}</div>
-          </div>
-          <div>
-            <div className="text-neutral-500 uppercase tracking-wide">Prompt Version</div>
-            <div className="font-mono text-blue-300">{selectedRunMeta?.prompt_hash?.slice(0, 12) ?? "n/a"}</div>
-          </div>
-          <div>
-            <div className="text-neutral-500 uppercase tracking-wide">Model</div>
-            <div className="font-mono text-neutral-200">
-              {selectedRunMeta?.model_name ?? selectedRunMeta?.model_root ?? "n/a"}
-            </div>
-          </div>
-          <div>
-            <div className="text-neutral-500 uppercase tracking-wide">Start Time</div>
-            <div className="font-mono text-neutral-200">
-              {selectedRunMeta?.started_at
-                ? new Date(selectedRunMeta.started_at).toLocaleString()
-                : selectedRunMeta?.timestamp
-                  ? new Date(selectedRunMeta.timestamp).toLocaleString()
-                  : "n/a"}
-            </div>
-          </div>
-        </div>
-      </section>
+      <RunInfo selectedRunId={selectedRunId} selectedRunMeta={selectedRunMeta} evaluationsCount={evaluations.length} />
 
       <LiveStatusBar summary={summary} evaluatedCount={evaluations.length} />
-
-      <section className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-4 py-3">
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-neutral-300">Run Info</h2>
-        <div className="grid gap-3 text-xs md:grid-cols-3">
-          <div>
-            <div className="text-neutral-500 uppercase tracking-wide">Prompt Hash</div>
-            <div className="font-mono text-neutral-200">{selectedRunMeta?.prompt_hash ?? "n/a"}</div>
-          </div>
-          <div>
-            <div className="text-neutral-500 uppercase tracking-wide">Model</div>
-            <div className="font-mono text-neutral-200">
-              {selectedRunMeta?.model_name ?? selectedRunMeta?.model_root ?? "n/a"}
-            </div>
-          </div>
-          <div>
-            <div className="text-neutral-500 uppercase tracking-wide">Tokens Used</div>
-            <div className="font-mono text-neutral-200">
-              {(selectedRunMeta?.token_input ?? 0) + (selectedRunMeta?.token_output ?? 0)}
-            </div>
-          </div>
-          <div>
-            <div className="text-neutral-500 uppercase tracking-wide">Time Elapsed</div>
-            <div className="font-mono text-neutral-200">{formatElapsed(selectedRunMeta)}</div>
-          </div>
-          <div>
-            <div className="text-neutral-500 uppercase tracking-wide">PRs Analyzed</div>
-            <div className="font-mono text-neutral-200">
-              {selectedRunMeta?.total_prs_scored ?? selectedRunMeta?.total_prs_seen ?? evaluations.length}
-            </div>
-          </div>
-          <div>
-            <div className="text-neutral-500 uppercase tracking-wide">Cost</div>
-            <div className="font-mono text-neutral-200">${(selectedRunMeta?.cost_usd ?? 0).toFixed(2)}</div>
-          </div>
-        </div>
-      </section>
 
       <Summary data={summary} />
 
