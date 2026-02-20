@@ -3,7 +3,6 @@
 import json
 from pathlib import Path
 
-import httpx
 from rich.console import Console
 
 from rlm_repo_intel import dashboard_push
@@ -18,8 +17,8 @@ from rlm_repo_intel.dashboard_push import (
 console = Console()
 
 
-def export_results(config: dict, fmt: str, output_dir: str, push_url: str | None = None):
-    """Export results to files and optionally push to an API."""
+def export_results(config: dict, fmt: str, output_dir: str, push: bool = False):
+    """Export results to files and optionally push to the dashboard."""
     results_dir = Path(config["paths"]["results_dir"])
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -63,9 +62,8 @@ def export_results(config: dict, fmt: str, output_dir: str, push_url: str | None
         json.dump(summary, f, indent=2)
     console.print(f"  Exported summary")
 
-    # Push to API if configured
-    if push_url:
-        _push_to_api(push_url, summary, result_files, config)
+    # Push to dashboard if requested
+    if push:
         _push_to_dashboard(summary, result_files)
 
     console.print(f"\n[bold green]✓ Export complete → {output_dir}[/]")
@@ -119,47 +117,6 @@ def _build_summary(results_dir: Path) -> dict:
             summary["clusters"] = len(clusters)
 
     return summary
-
-
-def _push_to_api(base_url: str, summary: dict, result_files: dict, config: dict):
-    """Push results to a web API (e.g., Clawmrades)."""
-    console.print(f"\n  Pushing results to {base_url}...")
-
-    headers = {}
-    # Check for Clawmrades API key
-    api_key_path = Path("~/.clawmrades/api-key").expanduser()
-    if api_key_path.exists():
-        headers["X-API-Key"] = api_key_path.read_text().strip()
-
-    try:
-        with httpx.Client(base_url=base_url, headers=headers, timeout=30) as client:
-            # Push summary
-            resp = client.post("/api/analysis/summary", json=summary)
-            console.print(f"    Summary: {resp.status_code}")
-
-            # Push individual evaluations
-            eval_path = result_files.get("pr_evaluations")
-            if eval_path and eval_path.exists():
-                with open(eval_path) as f:
-                    evals = [json.loads(line) for line in f]
-
-                for ev in evals:
-                    pr_num = ev["pr_number"]
-                    resp = client.post(f"/api/prs/{pr_num}/analyze", json={
-                        "risk_score": ev.get("risk_score", 0.5),
-                        "quality_score": ev.get("quality_score", 0.5),
-                        "review_summary": ev.get("review_summary", ""),
-                        "description": ev.get("title", ""),
-                        "has_tests": ev.get("test_alignment", 0) > 0.5,
-                        "has_breaking_changes": ev.get("risk_score", 0) > 0.8,
-                        "suggested_priority": _score_to_priority(ev.get("strategic_value", 0.5)),
-                        "confidence": ev.get("confidence", 0.5),
-                    })
-
-                console.print(f"    PR evaluations: {len(evals)} pushed")
-
-    except Exception as e:
-        console.print(f"    [red]Push failed: {e}[/]")
 
 
 def _push_to_dashboard(summary: dict, result_files: dict):
@@ -225,16 +182,6 @@ def _push_to_dashboard(summary: dict, result_files: dict):
             console.print("    Architecture: pushed")
     except Exception as e:
         console.print(f"    [red]Dashboard push failed: {e}[/]")
-
-
-def _score_to_priority(score: float) -> str:
-    if score >= 0.8:
-        return "critical"
-    elif score >= 0.6:
-        return "high"
-    elif score >= 0.3:
-        return "medium"
-    return "low"
 
 
 def _safe_load_json(path: Path) -> dict | list:

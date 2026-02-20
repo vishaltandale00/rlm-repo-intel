@@ -79,13 +79,13 @@ def synthesize(ctx, top_n):
 @main.command()
 @click.option("--format", "fmt", type=click.Choice(["json", "csv"]), default="json")
 @click.option("--output", "-o", default="results/", help="Output directory")
-@click.option("--push-url", help="Push results to API endpoint")
+@click.option("--push", is_flag=True, help="Push results to dashboard")
 @click.pass_context
-def export(ctx, fmt, output, push_url):
-    """Export results to files or push to a web endpoint."""
+def export(ctx, fmt, output, push):
+    """Export results to files and optionally push to the dashboard."""
     from .export import export_results
 
-    export_results(ctx.obj["config"], fmt=fmt, output_dir=output, push_url=push_url)
+    export_results(ctx.obj["config"], fmt=fmt, output_dir=output, push=push)
 
 
 if __name__ == "__main__":
