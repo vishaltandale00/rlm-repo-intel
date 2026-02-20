@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+from functools import partial
+from pathlib import Path
 from typing import Any
 
 from rlm import RLM
 
 from rlm_repo_intel.prompts.root_prompts import ROOT_FRONTIER_PROMPT
 from rlm_repo_intel.tools.repo_loader import (
-    build_repo_tree,
-    build_pr_table,
     build_issue_table,
-    load_repo_to_repl,
-    load_prs,
+    build_pr_table,
+    build_repo_tree,
     load_issues,
+    load_prs,
+    load_repo_to_repl,
 )
+from rlm_repo_intel.tools.search_tools import git_blame, git_log, web_search
 
 
 def create_frontier_rlm(config: dict[str, Any]) -> RLM:
@@ -21,6 +24,9 @@ def create_frontier_rlm(config: dict[str, Any]) -> RLM:
     repo_tree = build_repo_tree(repo)
     prs = load_prs(config)
     issues = load_issues(config)
+    repo_dir = (
+        Path(config["paths"]["repo_dir"]) / config["repo"]["owner"] / config["repo"]["name"]
+    )
 
     # All data goes into REPL variables — no tools needed except llm_query/rlm_query
     # Also precompute summary tables as REPL vars so the model can print() them
@@ -34,6 +40,9 @@ def create_frontier_rlm(config: dict[str, Any]) -> RLM:
         "issues": issues,
         "pr_table": pr_table,
         "issue_table": issue_table,
+        "web_search": web_search,
+        "git_log": partial(git_log, repo_dir=str(repo_dir)),
+        "git_blame": partial(git_blame, repo_dir=str(repo_dir)),
     }
 
     prompt_with_tables = ROOT_FRONTIER_PROMPT

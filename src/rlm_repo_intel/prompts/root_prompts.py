@@ -16,6 +16,11 @@ All data is preloaded in REPL variables:
 - `pr_table`
 - `issue_table`
 
+You also have `web_search(query, count=5)` to search the web for CVEs,
+library docs, and best practices.
+Use `git_log(file_path, n=10)` to understand file history and change frequency.
+Use `git_blame(file_path)` to see who wrote specific code and when.
+
 Work in strict phases.
 
 Phase 1 Build deep codebase understanding
