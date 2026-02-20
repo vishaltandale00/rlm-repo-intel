@@ -11,7 +11,7 @@ models:
   reviewer: claude-sonnet-4-20250514       # adversarial reviewer — challenges other agents' work
 
 budget:
-  max_spend_usd: 200
+  max_spend_usd: 2000
   phase1_pct: 20
   phase2_pct: 45
   phase3_pct: 35

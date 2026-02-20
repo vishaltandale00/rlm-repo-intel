@@ -24,6 +24,6 @@ def create_frontier_rlm(config: dict[str, Any]) -> RLM:
         compaction=True,
         max_depth=6,
         max_iterations=48,
-        max_budget=60.0,
+        max_budget=2000.0,
         verbose=True,
     )
