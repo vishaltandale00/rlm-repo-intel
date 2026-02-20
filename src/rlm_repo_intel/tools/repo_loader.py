@@ -58,6 +58,61 @@ def build_repo_tree(repo: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+def load_prs(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Load all PRs from JSONL into memory."""
+    import json
+    prs_path = Path(config["paths"]["data_dir"]) / "prs" / "all_prs.jsonl"
+    if not prs_path.exists():
+        return []
+    prs = []
+    for line in prs_path.read_text().splitlines():
+        if line.strip():
+            prs.append(json.loads(line))
+    return prs
+
+
+def load_issues(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Load all issues from JSONL into memory."""
+    import json
+    issues_path = Path(config["paths"]["data_dir"]) / "issues" / "all_issues.jsonl"
+    if not issues_path.exists():
+        return []
+    issues = []
+    for line in issues_path.read_text().splitlines():
+        if line.strip():
+            issues.append(json.loads(line))
+    return issues
+
+
+def build_pr_table(prs: list[dict[str, Any]]) -> str:
+    """Build a compact text table of PR metadata for the prompt."""
+    lines = ["# Open PRs Summary", f"Total: {len([p for p in prs if p.get('state') == 'open'])} open / {len(prs)} total", ""]
+    lines.append(f"{'PR':>6} | {'State':<8} | {'Files':>5} | {'+':>6} | {'-':>6} | {'Author':<20} | Title")
+    lines.append("-" * 100)
+    for pr in sorted(prs, key=lambda p: p.get("number", 0), reverse=True):
+        lines.append(
+            f"{pr.get('number', '?'):>6} | {pr.get('state', '?'):<8} | "
+            f"{pr.get('changedFiles', 0):>5} | {pr.get('additions', 0):>6} | {pr.get('deletions', 0):>6} | "
+            f"{(pr.get('author', {}) or {}).get('login', '?'):<20} | {pr.get('title', '?')[:80]}"
+        )
+    return "\n".join(lines)
+
+
+def build_issue_table(issues: list[dict[str, Any]]) -> str:
+    """Build a compact text table of issue metadata for the prompt."""
+    open_issues = [i for i in issues if i.get("state") == "open"]
+    lines = ["# Open Issues Summary", f"Total: {len(open_issues)} open / {len(issues)} total", ""]
+    lines.append(f"{'#':>6} | {'State':<8} | {'Comments':>8} | {'Author':<20} | Title")
+    lines.append("-" * 100)
+    for issue in sorted(open_issues, key=lambda i: i.get("number", 0), reverse=True):
+        lines.append(
+            f"{issue.get('number', '?'):>6} | {issue.get('state', '?'):<8} | "
+            f"{issue.get('comments', 0):>8} | "
+            f"{(issue.get('author', {}) or {}).get('login', '?'):<20} | {issue.get('title', '?')[:80]}"
+        )
+    return "\n".join(lines)
+
+
 def _is_binary_file(path: Path, sniff_size: int = 8192) -> bool:
     with path.open("rb") as f:
         chunk = f.read(sniff_size)
