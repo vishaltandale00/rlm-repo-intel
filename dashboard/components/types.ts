@@ -60,3 +60,10 @@ export interface SummaryData {
   cost_estimate?: number;
   cost_estimate_usd?: number;
 }
+
+export interface AgentTraceStep {
+  iteration: number;
+  type: "llm_response" | "code_execution";
+  content: string;
+  timestamp: string;
+}

@@ -4,11 +4,12 @@ import {
   appendEvaluation,
   setClusters,
   setRanking,
+  setAgentTrace,
 } from "@/lib/store";
 
 /**
  * Push endpoint — the local Python pipeline POSTs results here.
- * Accepts: { type: "summary"|"evaluation"|"clusters"|"ranking", data: ... }
+ * Accepts: { type: "summary"|"evaluation"|"evaluations_batch"|"clusters"|"ranking"|"trace", data: ... }
  * Protected by PUSH_SECRET env var.
  */
 export async function POST(req: NextRequest) {
@@ -45,6 +46,10 @@ export async function POST(req: NextRequest) {
     case "ranking":
       await setRanking(data);
       return NextResponse.json({ ok: true, type: "ranking" });
+
+    case "trace":
+      await setAgentTrace(data);
+      return NextResponse.json({ ok: true, type: "trace", count: Array.isArray(data) ? data.length : 0 });
 
     default:
       return NextResponse.json({ error: `unknown type: ${type}` }, { status: 400 });

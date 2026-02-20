@@ -43,6 +43,13 @@ export interface PRCluster {
   }>;
 }
 
+export interface AgentTraceStep {
+  iteration: number;
+  type: "llm_response" | "code_execution";
+  content: string;
+  timestamp: string;
+}
+
 function getSQL() {
   const url = process.env.DATABASE_URL;
   if (!url) return null;
@@ -134,4 +141,12 @@ export async function getRanking(): Promise<Record<string, unknown> | null> {
 
 export async function setRanking(data: Record<string, unknown>) {
   await writeKV("rlm:ranking", data);
+}
+
+export async function getAgentTrace(): Promise<AgentTraceStep[]> {
+  return readKV("rlm:agent_trace", []);
+}
+
+export async function setAgentTrace(data: AgentTraceStep[]) {
+  await writeKV("rlm:agent_trace", data);
 }

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -36,7 +37,51 @@ def _parse_result_payload(result: Any) -> Any:
     try:
         return json.loads(response_text)
     except json.JSONDecodeError:
-        return response_text
+        # Fallback for Python-style repr payloads returned from REPL variables.
+        try:
+            return ast.literal_eval(response_text)
+        except (SyntaxError, ValueError):
+            return response_text
+
+
+def _looks_like_triage_payload(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    if not all(isinstance(item, dict) for item in value):
+        return False
+    required = {"number", "pr_number", "title", "urgency", "quality", "state"}
+    first_keys = set(value[0].keys())
+    return bool(required & first_keys)
+
+
+def _extract_final_var_from_repl(rlm: Any) -> Any | None:
+    env = getattr(rlm, "_persistent_env", None)
+    locals_ns = getattr(env, "locals", None)
+    if not isinstance(locals_ns, dict):
+        return None
+
+    # Prefer explicit names first.
+    preferred_names = (
+        "FINAL_VAR",
+        "final_var",
+        "final_results",
+        "triage_results",
+        "results",
+        "output",
+    )
+    for name in preferred_names:
+        if name in locals_ns and _looks_like_triage_payload(locals_ns[name]):
+            return locals_ns[name]
+
+    # Fall back to best matching list-of-dicts payload in REPL locals.
+    candidates: list[list[dict[str, Any]]] = []
+    for value in locals_ns.values():
+        if _looks_like_triage_payload(value):
+            candidates.append(value)
+    if not candidates:
+        return None
+    candidates.sort(key=len, reverse=True)
+    return candidates[0]
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -281,15 +326,19 @@ def main():
     print("=" * 80)
 
     result = rlm.completion(prompt)
-    result_payload = _parse_result_payload(result)
+    response_text = _extract_response_text(result)
+    repl_payload = _extract_final_var_from_repl(rlm)
+    result_payload = repl_payload if repl_payload is not None else _parse_result_payload(result)
 
     print("=" * 80)
     print("RLM RESULT:")
-    print(_extract_response_text(result))
+    print(response_text)
 
     # Save local backup first.
     output_path = Path(".rlm-repo-intel/results/triage.json")
+    trace_path = Path(".rlm-repo-intel/results/agent_trace.txt")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.write_text(response_text)
 
     try:
         if isinstance(result_payload, (dict, list)):
@@ -300,6 +349,7 @@ def main():
         output_path.write_text(str(result))
 
     print(f"\nResults saved to {output_path}")
+    print(f"Agent trace saved to {trace_path}")
 
     database_url = os.getenv("DATABASE_URL")
     if not database_url:

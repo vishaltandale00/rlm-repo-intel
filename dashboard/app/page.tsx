@@ -7,16 +7,17 @@ async function getData() {
   const base = process.env.DATA_URL || "/api";
 
   try {
-    const [summary, evaluations, clusters, ranking] = await Promise.all([
+    const [summary, evaluations, clusters, ranking, trace] = await Promise.all([
       fetch(`${base}/summary`).then((response) => response.json()).catch(() => null),
       fetch(`${base}/evaluations`).then((response) => response.json()).catch(() => []),
       fetch(`${base}/clusters`).then((response) => response.json()).catch(() => []),
       fetch(`${base}/ranking`).then((response) => response.json()).catch(() => null),
+      fetch(`${base}/trace`).then((response) => response.json()).catch(() => []),
     ]);
 
-    return { summary, evaluations, clusters, ranking };
+    return { summary, evaluations, clusters, ranking, trace };
   } catch {
-    return { summary: null, evaluations: [], clusters: [], ranking: null };
+    return { summary: null, evaluations: [], clusters: [], ranking: null, trace: [] };
   }
 }
 
@@ -37,6 +38,7 @@ export default async function Home() {
         evaluations={data.evaluations}
         clusters={data.clusters}
         ranking={data.ranking}
+        trace={data.trace}
       />
     </main>
   );
