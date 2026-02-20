@@ -80,10 +80,6 @@ function normalizeEvaluation(raw: unknown): EvaluationItem | null {
 }
 
 async function getData(selectedRunId: string | null) {
-  if (!selectedRunId) {
-    return { summary: null, evaluations: [], clusters: [], ranking: null, trace: [] };
-  }
-
   const [summary, evaluations, clusters, ranking, trace] = await Promise.all([
     getSummary(selectedRunId),
     getEvaluations(selectedRunId),
@@ -107,7 +103,7 @@ export default async function Home({ searchParams }: HomeProps) {
   const resolvedSearchParams = searchParams ? await searchParams : undefined;
   const runsDesc = await getRuns();
   const runs = [...runsDesc].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-  const latestRunId = runsDesc[0]?.id ?? (await getLatestRunId());
+  const latestRunId = await getLatestRunId();
   const requestedRunId = resolvedSearchParams?.run;
   const selectedRunId = requestedRunId && runs.some((run) => run.id === requestedRunId) ? requestedRunId : latestRunId;
   const data = await getData(selectedRunId ?? null);

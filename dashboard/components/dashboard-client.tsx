@@ -35,6 +35,7 @@ function formatTraceTime(timestamp: string) {
 }
 
 function formatRunLabel(run: RunTab, index: number) {
+  if (run.id === "legacy") return "Legacy Run";
   const date = new Date(run.timestamp);
   const dateLabel = Number.isNaN(date.getTime())
     ? run.id

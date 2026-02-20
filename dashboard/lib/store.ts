@@ -59,6 +59,12 @@ function getSQL() {
 // Auto-create tables on first use
 let initialized = false;
 const RUNS_KEY = "rlm:runs";
+export const LEGACY_RUN_ID = "legacy";
+const LEGACY_SUMMARY_KEY = "rlm:summary";
+const LEGACY_EVALUATIONS_KEY = "rlm:evaluations";
+const LEGACY_CLUSTERS_KEY = "rlm:clusters";
+const LEGACY_RANKING_KEY = "rlm:ranking";
+const LEGACY_AGENT_TRACE_KEY = "rlm:agent_trace";
 
 async function ensureTables() {
   if (initialized) return;
@@ -108,8 +114,34 @@ export interface RunInfo {
   timestamp: string;
 }
 
-function runKey(runId: string, kind: "summary" | "evaluations" | "clusters" | "ranking" | "agent_trace" | "meta") {
+type DataKind = "summary" | "evaluations" | "clusters" | "ranking" | "agent_trace" | "meta";
+
+function runKey(runId: string, kind: DataKind) {
   return `rlm:run:${runId}:${kind}`;
+}
+
+function legacyKey(kind: Exclude<DataKind, "meta">) {
+  switch (kind) {
+    case "summary":
+      return LEGACY_SUMMARY_KEY;
+    case "evaluations":
+      return LEGACY_EVALUATIONS_KEY;
+    case "clusters":
+      return LEGACY_CLUSTERS_KEY;
+    case "ranking":
+      return LEGACY_RANKING_KEY;
+    case "agent_trace":
+      return LEGACY_AGENT_TRACE_KEY;
+  }
+}
+
+function isLegacyScope(runId?: string | null) {
+  return !runId || runId === "latest" || runId === LEGACY_RUN_ID;
+}
+
+function hasData(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  return value !== null && value !== undefined;
 }
 
 function toTimestamp(runId: string, fallback: string) {
@@ -128,7 +160,32 @@ export function createRunId() {
   return String(Date.now());
 }
 
+async function hasLegacyData() {
+  const [summary, evaluations, clusters, ranking, trace] = await Promise.all([
+    readKV<AnalysisSummary | null>(LEGACY_SUMMARY_KEY, null),
+    readKV<PREvaluation[]>(LEGACY_EVALUATIONS_KEY, []),
+    readKV<PRCluster[]>(LEGACY_CLUSTERS_KEY, []),
+    readKV<Record<string, unknown> | null>(LEGACY_RANKING_KEY, null),
+    readKV<AgentTraceStep[]>(LEGACY_AGENT_TRACE_KEY, []),
+  ]);
+  return [summary, evaluations, clusters, ranking, trace].some(hasData);
+}
+
+async function ensureLegacyRunMigration() {
+  const existing = await readKV<string[]>(RUNS_KEY, []);
+  if (existing.length > 0) return;
+  if (!(await hasLegacyData())) return;
+
+  const now = new Date().toISOString();
+  await writeKV(RUNS_KEY, [LEGACY_RUN_ID]);
+  await writeKV(runKey(LEGACY_RUN_ID, "meta"), {
+    id: LEGACY_RUN_ID,
+    timestamp: now,
+  } satisfies RunInfo);
+}
+
 export async function getRunIds(): Promise<string[]> {
+  await ensureLegacyRunMigration();
   return readKV(RUNS_KEY, []);
 }
 
@@ -164,11 +221,23 @@ export async function getRuns(): Promise<RunInfo[]> {
 
 export async function getLatestRunId(): Promise<string | null> {
   const runs = await getRuns();
+  if (runs.length === 0) return null;
+
+  const counts = await Promise.all(runs.map(async (run) => ({ id: run.id, count: await getEvaluationCount(run.id) })));
+  const best = counts.reduce((winner, current) => (current.count > winner.count ? current : winner), {
+    id: runs[0].id,
+    count: -1,
+  });
+
+  if (best.count > 0) return best.id;
+  if (runs.some((run) => run.id === LEGACY_RUN_ID)) return LEGACY_RUN_ID;
   return runs[0]?.id ?? null;
 }
 
-export async function getSummary(runId: string): Promise<AnalysisSummary | null> {
-  return readKV(runKey(runId, "summary"), null);
+export async function getSummary(runId?: string | null): Promise<AnalysisSummary | null> {
+  if (isLegacyScope(runId)) return readKV(legacyKey("summary"), null);
+  const scopedRunId = runId as string;
+  return readKV(runKey(scopedRunId, "summary"), null);
 }
 
 export async function setSummary(runId: string, data: AnalysisSummary) {
@@ -177,13 +246,24 @@ export async function setSummary(runId: string, data: AnalysisSummary) {
   await writeKV(runKey(runId, "summary"), data);
 }
 
-export async function getEvaluations(runId: string): Promise<PREvaluation[]> {
-  return readKV(runKey(runId, "evaluations"), []);
+export async function setLegacySummary(data: AnalysisSummary) {
+  data.last_updated = new Date().toISOString();
+  await writeKV(legacyKey("summary"), data);
+}
+
+export async function getEvaluations(runId?: string | null): Promise<PREvaluation[]> {
+  if (isLegacyScope(runId)) return readKV(legacyKey("evaluations"), []);
+  const scopedRunId = runId as string;
+  return readKV(runKey(scopedRunId, "evaluations"), []);
 }
 
 export async function setEvaluations(runId: string, data: PREvaluation[]) {
   await ensureRun(runId);
   await writeKV(runKey(runId, "evaluations"), data);
+}
+
+export async function setLegacyEvaluations(data: PREvaluation[]) {
+  await writeKV(legacyKey("evaluations"), data);
 }
 
 export async function appendEvaluation(runId: string, ev: PREvaluation) {
@@ -194,8 +274,18 @@ export async function appendEvaluation(runId: string, ev: PREvaluation) {
   await setEvaluations(runId, existing);
 }
 
-export async function getClusters(runId: string): Promise<PRCluster[]> {
-  return readKV(runKey(runId, "clusters"), []);
+export async function appendLegacyEvaluation(ev: PREvaluation) {
+  const existing = await getEvaluations(LEGACY_RUN_ID);
+  const idx = existing.findIndex((e) => e.pr_number === ev.pr_number);
+  if (idx >= 0) existing[idx] = ev;
+  else existing.push(ev);
+  await setLegacyEvaluations(existing);
+}
+
+export async function getClusters(runId?: string | null): Promise<PRCluster[]> {
+  if (isLegacyScope(runId)) return readKV(legacyKey("clusters"), []);
+  const scopedRunId = runId as string;
+  return readKV(runKey(scopedRunId, "clusters"), []);
 }
 
 export async function setClusters(runId: string, data: PRCluster[]) {
@@ -203,8 +293,14 @@ export async function setClusters(runId: string, data: PRCluster[]) {
   await writeKV(runKey(runId, "clusters"), data);
 }
 
-export async function getRanking(runId: string): Promise<Record<string, unknown> | null> {
-  return readKV(runKey(runId, "ranking"), null);
+export async function setLegacyClusters(data: PRCluster[]) {
+  await writeKV(legacyKey("clusters"), data);
+}
+
+export async function getRanking(runId?: string | null): Promise<Record<string, unknown> | null> {
+  if (isLegacyScope(runId)) return readKV(legacyKey("ranking"), null);
+  const scopedRunId = runId as string;
+  return readKV(runKey(scopedRunId, "ranking"), null);
 }
 
 export async function setRanking(runId: string, data: Record<string, unknown>) {
@@ -212,11 +308,26 @@ export async function setRanking(runId: string, data: Record<string, unknown>) {
   await writeKV(runKey(runId, "ranking"), data);
 }
 
-export async function getAgentTrace(runId: string): Promise<AgentTraceStep[]> {
-  return readKV(runKey(runId, "agent_trace"), []);
+export async function setLegacyRanking(data: Record<string, unknown>) {
+  await writeKV(legacyKey("ranking"), data);
+}
+
+export async function getAgentTrace(runId?: string | null): Promise<AgentTraceStep[]> {
+  if (isLegacyScope(runId)) return readKV(legacyKey("agent_trace"), []);
+  const scopedRunId = runId as string;
+  return readKV(runKey(scopedRunId, "agent_trace"), []);
 }
 
 export async function setAgentTrace(runId: string, data: AgentTraceStep[]) {
   await ensureRun(runId);
   await writeKV(runKey(runId, "agent_trace"), data);
+}
+
+export async function setLegacyAgentTrace(data: AgentTraceStep[]) {
+  await writeKV(legacyKey("agent_trace"), data);
+}
+
+async function getEvaluationCount(runId: string) {
+  const evaluations = await getEvaluations(runId);
+  return Array.isArray(evaluations) ? evaluations.length : 0;
 }
