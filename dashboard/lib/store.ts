@@ -1,9 +1,13 @@
 /**
- * Neon Postgres-backed store for analysis results.
- * Requires DATABASE_URL env var pointing to a Neon connection string.
+ * Static JSON file store.
+ * Data lives in public/data/ — committed to repo, served as static files.
+ * Pipeline writes to these files, pushes to git, Vercel auto-deploys.
  */
 
-import { neon } from "@neondatabase/serverless";
+import { readFile } from "fs/promises";
+import { join } from "path";
+
+const DATA_DIR = join(process.cwd(), "public", "data");
 
 export interface AnalysisSummary {
   repo?: string;
@@ -43,95 +47,35 @@ export interface PRCluster {
   }>;
 }
 
-function getSQL() {
-  const url = process.env.DATABASE_URL;
-  if (!url) return null;
-  return neon(url);
-}
-
-// Auto-create tables on first use
-let initialized = false;
-
-async function ensureTables() {
-  if (initialized) return;
-  const sql = getSQL();
-  if (!sql) return;
-
-  await sql`
-    CREATE TABLE IF NOT EXISTS rlm_kv (
-      key TEXT PRIMARY KEY,
-      value JSONB NOT NULL,
-      updated_at TIMESTAMPTZ DEFAULT NOW()
-    )
-  `;
-  initialized = true;
-}
-
-async function readKV<T>(key: string, fallback: T): Promise<T> {
-  const sql = getSQL();
-  if (!sql) return fallback;
+async function readJSON<T>(filename: string, fallback: T): Promise<T> {
   try {
-    await ensureTables();
-    const rows = await sql`SELECT value FROM rlm_kv WHERE key = ${key}`;
-    if (rows.length === 0) return fallback;
-    return rows[0].value as T;
+    const data = await readFile(join(DATA_DIR, filename), "utf-8");
+    return JSON.parse(data);
   } catch {
     return fallback;
   }
 }
 
-async function writeKV(key: string, value: unknown): Promise<void> {
-  const sql = getSQL();
-  if (!sql) return;
-  try {
-    await ensureTables();
-    await sql`
-      INSERT INTO rlm_kv (key, value, updated_at) 
-      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
-      ON CONFLICT (key) DO UPDATE SET value = ${JSON.stringify(value)}::jsonb, updated_at = NOW()
-    `;
-  } catch {
-    // graceful fallback
-  }
-}
-
 export async function getSummary(): Promise<AnalysisSummary | null> {
-  return readKV("rlm:summary", null);
-}
-
-export async function setSummary(data: AnalysisSummary) {
-  data.last_updated = new Date().toISOString();
-  await writeKV("rlm:summary", data);
+  return readJSON("summary.json", null);
 }
 
 export async function getEvaluations(): Promise<PREvaluation[]> {
-  return readKV("rlm:evaluations", []);
-}
-
-export async function setEvaluations(data: PREvaluation[]) {
-  await writeKV("rlm:evaluations", data);
-}
-
-export async function appendEvaluation(ev: PREvaluation) {
-  const existing = await getEvaluations();
-  const idx = existing.findIndex((e) => e.pr_number === ev.pr_number);
-  if (idx >= 0) existing[idx] = ev;
-  else existing.push(ev);
-  await setEvaluations(existing);
+  return readJSON("evaluations.json", []);
 }
 
 export async function getClusters(): Promise<PRCluster[]> {
-  return readKV("rlm:clusters", []);
-}
-
-export async function setClusters(data: PRCluster[]) {
-  await writeKV("rlm:clusters", data);
+  return readJSON("clusters.json", []);
 }
 
 export async function getRanking(): Promise<Record<string, unknown> | null> {
-  return readKV("rlm:ranking", null);
+  return readJSON("ranking.json", null);
 }
 
-export async function setRanking(data: Record<string, unknown>) {
-  await writeKV("rlm:ranking", data);
-}
+// Write functions not needed — pipeline writes directly to public/data/
+// and pushes via git. Keeping stubs for API compatibility.
+export async function setSummary() {}
+export async function setEvaluations() {}
+export async function appendEvaluation() {}
+export async function setClusters() {}
+export async function setRanking() {}
