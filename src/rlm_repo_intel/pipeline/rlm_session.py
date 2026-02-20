@@ -60,12 +60,13 @@ def create_frontier_rlm(config: dict[str, Any], run_id: str | None = None) -> RL
 
     return RLM(
         backend="litellm",
-        backend_kwargs={"model_name": "anthropic/claude-sonnet-4-20250514"},
+        backend_kwargs={"model_name": "gemini/gemini-2.5-pro"},
         custom_system_prompt=prompt_with_tables,
         custom_tools=custom_tools,
         custom_sub_tools={},  # sub-agents get no tools, just llm_query
         persistent=True,
         compaction=True,
+        compaction_threshold_pct=0.60,
         max_depth=6,
         max_iterations=48,
         max_budget=2000.0,
