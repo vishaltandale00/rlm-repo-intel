@@ -15,6 +15,7 @@ import httpx
 
 INPUT_PATH = Path(".rlm-repo-intel/prs/all_prs.jsonl")
 OUTPUT_PATH = Path(".rlm-repo-intel/prs/all_prs_with_diffs.jsonl")
+BACKUP_PATH = INPUT_PATH.with_suffix(INPUT_PATH.suffix + ".bak")
 REPO = "openclaw/openclaw"
 API_BASE = f"https://api.github.com/repos/{REPO}/pulls"
 REQUEST_DELAY_SECONDS = 0.2
@@ -61,69 +62,140 @@ def _fetch_diff(client: httpx.Client, pr_number: int) -> str:
     return response.text
 
 
+def _load_existing_diffs(path: Path) -> tuple[dict[int, str], int]:
+    """Load previously fetched PR diffs from an existing output file."""
+    if not path.exists() or path.stat().st_size == 0:
+        return {}, 0
+
+    diffs_by_pr: dict[int, str] = {}
+    lines_seen = 0
+    with path.open() as existing_file:
+        for line_number, line in enumerate(existing_file, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            lines_seen += 1
+            try:
+                pr = json.loads(line)
+            except json.JSONDecodeError as exc:
+                print(f"[warn] malformed JSON in existing output at line {line_number}: {exc}")
+                continue
+
+            pr_number = pr.get("number")
+            diff_text = pr.get("diff")
+            if isinstance(pr_number, int) and isinstance(diff_text, str) and diff_text:
+                diffs_by_pr[pr_number] = diff_text
+
+    return diffs_by_pr, lines_seen
+
+
 def main() -> int:
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        print("GITHUB_TOKEN is not set. Export it before running this script.")
-        return 1
+    start_time = time.perf_counter()
 
     if not INPUT_PATH.exists():
         print(f"Input file not found: {INPUT_PATH}")
         return 1
 
+    shutil.copy2(INPUT_PATH, BACKUP_PATH)
+    print(f"[backup] created {BACKUP_PATH}")
+
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        print("GITHUB_TOKEN is not set. Export it before running this script.")
+        return 1
+
+    existing_diffs_by_pr, existing_output_lines = _load_existing_diffs(OUTPUT_PATH)
+    if existing_output_lines > 0:
+        print(
+            f"[resume] detected existing output lines={existing_output_lines} "
+            f"cached_diffs={len(existing_diffs_by_pr)}"
+        )
+
     total = 0
     open_count = 0
     fetched = 0
     failed = 0
+    resumed = 0
+    completed_successfully = False
 
-    with httpx.Client(headers=_github_headers(token), follow_redirects=True) as client:
-        with INPUT_PATH.open() as in_file, OUTPUT_PATH.open("w") as out_file:
-            for line_number, line in enumerate(in_file, start=1):
-                line = line.strip()
-                if not line:
-                    continue
+    try:
+        with httpx.Client(headers=_github_headers(token), follow_redirects=True) as client:
+            with INPUT_PATH.open() as in_file, OUTPUT_PATH.open("w") as out_file:
+                for line_number, line in enumerate(in_file, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
 
-                total += 1
-                try:
-                    pr = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    print(f"[warn] malformed JSON at line {line_number}: {exc}")
-                    continue
+                    total += 1
+                    try:
+                        pr = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        print(f"[warn] malformed JSON at line {line_number}: {exc}")
+                        continue
 
-                if pr.get("state") == "open":
-                    open_count += 1
-                    pr_number = pr.get("number")
-                    diff_text = ""
+                    if pr.get("state") == "open":
+                        open_count += 1
+                        pr_number = pr.get("number")
+                        diff_text = ""
 
-                    if isinstance(pr_number, int):
-                        try:
-                            diff_text = _fetch_diff(client, pr_number)
-                            fetched += 1
-                        except Exception as exc:
+                        if isinstance(pr_number, int):
+                            if pr_number in existing_diffs_by_pr:
+                                diff_text = existing_diffs_by_pr[pr_number]
+                                resumed += 1
+                            else:
+                                try:
+                                    diff_text = _fetch_diff(client, pr_number)
+                                    fetched += 1
+                                except Exception as exc:
+                                    failed += 1
+                                    print(
+                                        f"[error] failed to fetch diff for PR #{pr_number}: {exc}"
+                                    )
+                                time.sleep(REQUEST_DELAY_SECONDS)
+                        else:
                             failed += 1
-                            print(f"[error] failed to fetch diff for PR #{pr_number}: {exc}")
-                    else:
-                        failed += 1
-                        print(f"[error] invalid PR number at line {line_number}: {pr_number}")
+                            print(f"[error] invalid PR number at line {line_number}: {pr_number}")
 
-                    pr["diff"] = diff_text
+                        pr["diff"] = diff_text
 
-                    if open_count % PROGRESS_EVERY == 0:
-                        print(
-                            f"[progress] processed_open={open_count} fetched={fetched} failed={failed}"
-                        )
+                        if open_count % PROGRESS_EVERY == 0:
+                            print(
+                                "[progress]"
+                                f" processed_open={open_count}"
+                                f" fetched={fetched}"
+                                f" resumed={resumed}"
+                                f" failed={failed}"
+                            )
 
-                    time.sleep(REQUEST_DELAY_SECONDS)
+                    out_file.write(json.dumps(pr, ensure_ascii=False) + "\n")
 
-                out_file.write(json.dumps(pr, ensure_ascii=False) + "\n")
+        completed_successfully = True
+    except KeyboardInterrupt:
+        print("[interrupt] run interrupted; input was not replaced.")
+    except Exception as exc:
+        print(f"[fatal] run failed before completion: {exc}")
 
-    shutil.copy2(OUTPUT_PATH, INPUT_PATH)
+    elapsed_seconds = time.perf_counter() - start_time
+    if completed_successfully:
+        shutil.copy2(OUTPUT_PATH, INPUT_PATH)
+        print(
+            "Done."
+            f" total={total} open={open_count} fetched={fetched} resumed={resumed} failed={failed}"
+            f" output={OUTPUT_PATH} replaced={INPUT_PATH}"
+            f" backup={BACKUP_PATH} (retained)"
+            f" elapsed={elapsed_seconds:.2f}s"
+        )
+        return 0
+
     print(
-        "Done."
-        f" total={total} open={open_count} fetched={fetched} failed={failed}"
-        f" output={OUTPUT_PATH} replaced={INPUT_PATH}"
+        "Stopped."
+        f" total={total} open={open_count} fetched={fetched} resumed={resumed} failed={failed}"
+        f" output_partial={OUTPUT_PATH}"
+        f" input_preserved={INPUT_PATH}"
+        f" backup={BACKUP_PATH} (retained)"
+        f" elapsed={elapsed_seconds:.2f}s"
     )
-    return 0
+    return 1
 
 
 if __name__ == "__main__":
