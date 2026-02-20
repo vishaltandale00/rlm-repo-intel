@@ -1,0 +1,20 @@
+repo:
+  owner: openclaw
+  name: openclaw
+  branch: main
+
+models:
+  root: claude-sonnet-4-20250514
+  code_worker: gpt-5.3-codex
+  reasoning_worker: gemini-3.1-pro
+  cheap_worker: gpt-5-mini
+
+budget:
+  max_spend_usd: 200
+  phase1_pct: 20
+  phase2_pct: 45
+  phase3_pct: 35
+
+output:
+  format: json
+  push_to: https://www.clawmrades.ai/api
