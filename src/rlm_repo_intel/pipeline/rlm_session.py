@@ -36,11 +36,7 @@ def create_frontier_rlm(config: dict[str, Any]) -> RLM:
         "issue_table": issue_table,
     }
 
-    # Keep prompt small — just counts + instructions. Tables are in REPL vars.
-    open_prs = len([p for p in prs if p.get("state") == "open"])
-    open_issues = len([i for i in issues if i.get("state") == "open"])
-    stats = f"Data loaded: {len(repo)} files, {open_prs} open PRs ({len(prs)} total), {open_issues} open issues ({len(issues)} total). Use `pr_table` and `issue_table` REPL vars for quick scanning."
-    prompt_with_tables = ROOT_FRONTIER_PROMPT + "\n\n" + stats
+    prompt_with_tables = ROOT_FRONTIER_PROMPT
 
     return RLM(
         backend="litellm",
