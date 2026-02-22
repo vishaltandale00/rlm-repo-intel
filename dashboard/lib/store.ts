@@ -45,9 +45,37 @@ export interface PRCluster {
 
 export interface AgentTraceStep {
   iteration: number;
-  type: "llm_response" | "code_execution";
+  type: "llm_response" | "code_execution" | "iteration_complete" | "subcall_start" | "subcall_complete";
   content: string;
   timestamp: string;
+}
+
+export interface RunComparisonRow {
+  pr_number: number;
+  title: string;
+  run_a_score: number | null;
+  run_b_score: number | null;
+  delta: number | null;
+  rank_a: number | null;
+  rank_b: number | null;
+  justification_a: string;
+  justification_b: string;
+}
+
+export interface RunComparisonData {
+  run_a: {
+    id: string;
+    meta: RunMeta | null;
+    scored_count: number;
+    avg_score: number;
+  };
+  run_b: {
+    id: string;
+    meta: RunMeta | null;
+    scored_count: number;
+    avg_score: number;
+  };
+  rows: RunComparisonRow[];
 }
 
 function getSQL() {
@@ -376,6 +404,87 @@ export async function getEvaluations(runId?: string | null): Promise<PREvaluatio
   if (isLegacyScope(runId)) return readKV(legacyKey("evaluations"), []);
   const scopedRunId = runId as string;
   return readKV(runKey(scopedRunId, "evaluations"), []);
+}
+
+function comparisonScore(item: PREvaluation): number {
+  const maybe = item as PREvaluation & { final_score?: number; score?: number };
+  const candidate = maybe.final_score ?? item.final_rank_score ?? maybe.score;
+  return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : 0;
+}
+
+function comparisonJustification(item: PREvaluation): string {
+  const maybe = item as PREvaluation & { justification?: string };
+  if (typeof maybe.justification === "string" && maybe.justification.trim()) return maybe.justification;
+  if (typeof item.review_summary === "string" && item.review_summary.trim()) return item.review_summary;
+  return "";
+}
+
+function averageScore(items: PREvaluation[]): number {
+  if (items.length === 0) return 0;
+  const total = items.reduce((sum, item) => sum + comparisonScore(item), 0);
+  return total / items.length;
+}
+
+export async function getRunComparison(runA: string, runB: string): Promise<RunComparisonData> {
+  const [metaA, metaB, evalsA, evalsB] = await Promise.all([
+    getRunMeta(runA),
+    getRunMeta(runB),
+    getEvaluations(runA),
+    getEvaluations(runB),
+  ]);
+
+  const sortedA = [...evalsA].sort((a, b) => comparisonScore(b) - comparisonScore(a));
+  const sortedB = [...evalsB].sort((a, b) => comparisonScore(b) - comparisonScore(a));
+
+  const rankA = new Map(sortedA.map((item, index) => [item.pr_number, index + 1]));
+  const rankB = new Map(sortedB.map((item, index) => [item.pr_number, index + 1]));
+  const mapA = new Map(evalsA.map((item) => [item.pr_number, item]));
+  const mapB = new Map(evalsB.map((item) => [item.pr_number, item]));
+
+  const allPRs = new Set<number>([...mapA.keys(), ...mapB.keys()]);
+  const rows: RunComparisonRow[] = [];
+
+  for (const prNumber of allPRs) {
+    const a = mapA.get(prNumber);
+    const b = mapB.get(prNumber);
+    const scoreA = a ? comparisonScore(a) : null;
+    const scoreB = b ? comparisonScore(b) : null;
+    const delta =
+      scoreA !== null && scoreB !== null ? Number((scoreB - scoreA).toFixed(4)) : null;
+    rows.push({
+      pr_number: prNumber,
+      title: a?.title ?? b?.title ?? `PR #${prNumber}`,
+      run_a_score: scoreA,
+      run_b_score: scoreB,
+      delta,
+      rank_a: rankA.get(prNumber) ?? null,
+      rank_b: rankB.get(prNumber) ?? null,
+      justification_a: a ? comparisonJustification(a) : "",
+      justification_b: b ? comparisonJustification(b) : "",
+    });
+  }
+
+  rows.sort((left, right) => {
+    const leftAbs = left.delta === null ? -1 : Math.abs(left.delta);
+    const rightAbs = right.delta === null ? -1 : Math.abs(right.delta);
+    return rightAbs - leftAbs;
+  });
+
+  return {
+    run_a: {
+      id: runA,
+      meta: metaA,
+      scored_count: evalsA.length,
+      avg_score: Number(averageScore(evalsA).toFixed(4)),
+    },
+    run_b: {
+      id: runB,
+      meta: metaB,
+      scored_count: evalsB.length,
+      avg_score: Number(averageScore(evalsB).toFixed(4)),
+    },
+    rows,
+  };
 }
 
 export async function setEvaluations(runId: string, data: PREvaluation[]) {

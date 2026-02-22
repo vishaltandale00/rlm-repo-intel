@@ -28,9 +28,14 @@ def _post(payload_type: str, data: Any, run_id: str | None = None) -> Any:
     if run_id:
         payload["run_id"] = run_id
 
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    push_secret = os.getenv("PUSH_SECRET")
+    if push_secret:
+        headers["Authorization"] = f"Bearer {push_secret}"
+
     try:
         if requests is not None:
-            response = requests.post(DASHBOARD_API_URL, json=payload, timeout=15)
+            response = requests.post(DASHBOARD_API_URL, json=payload, headers=headers, timeout=15)
             response.raise_for_status()
             if response.headers.get("content-type", "").startswith("application/json"):
                 return response.json()
@@ -40,7 +45,7 @@ def _post(payload_type: str, data: Any, run_id: str | None = None) -> Any:
         req = urllib_request.Request(
             DASHBOARD_API_URL,
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         with urllib_request.urlopen(req, timeout=15) as resp:

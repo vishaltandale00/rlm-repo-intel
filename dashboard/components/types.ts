@@ -72,7 +72,7 @@ export interface SummaryData {
 
 export interface AgentTraceStep {
   iteration: number;
-  type: "llm_response" | "code_execution";
+  type: "llm_response" | "code_execution" | "iteration_complete" | "subcall_start" | "subcall_complete";
   content: string;
   timestamp: string;
 }

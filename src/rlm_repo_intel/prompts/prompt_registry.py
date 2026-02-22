@@ -13,8 +13,9 @@ _VERSIONS_DIR = _PROMPTS_DIR / "versions"
 _REGISTRY_PATH = _PROMPTS_DIR / "registry.json"
 
 _TOOLS_CONTRACT = {
-    "required_tools": ["push_partial_results", "push_trace_step"],
-    "phase2_batch_push": "push_partial_results(scored_prs_list)",
+    "required_tools": ["push_partial_results", "push_trace_step", "llm_query", "rlm_query"],
+    "optional_tools": ["role_query", "web_search", "git_log", "git_blame"],
+    "required_outputs": ["triage_results", "top_prs", "triage_summary", "triage_bundle"],
 }
 
 

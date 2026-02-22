@@ -19,3 +19,21 @@ budget:
 output:
   format: json
   push_to: https://www.clawmrades.ai/api
+
+pipeline:
+  max_budget: 2000
+  max_timeout: 7200
+  max_errors: 50
+  lm_request_timeout_seconds: 900
+  lm_request_retries: 2
+  max_depth: 5
+  max_iterations: 50
+  compaction_threshold_pct: 0.55
+  output_contract_mode: strict_repl
+  output_repair_attempts: 1
+  observability:
+    enabled: true
+    heartbeat_seconds: 10
+    capture_stdout_chars: 4000
+    capture_stderr_chars: 4000
+    response_preview_chars: 2000

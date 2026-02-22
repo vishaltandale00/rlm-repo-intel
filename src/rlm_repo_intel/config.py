@@ -13,7 +13,7 @@ DEFAULT_CONFIG = {
         "branch": "main",
     },
     "models": {
-        "root": "claude-sonnet-4-20250514",
+        "root": "claude-sonnet-4-6",
         "code_worker": "codex-5.3",
         "reasoning_worker": "gemini-3.1-pro",
         "cheap_worker": "claude-haiku",
@@ -40,6 +40,25 @@ DEFAULT_CONFIG = {
         "escalation_pct": 0.20,
         "pair_candidates_max": 15_000,
         "ingest_pr_limit": 100,
+    },
+    "pipeline": {
+        "max_budget": 2000,
+        "max_timeout": 7200,
+        "max_errors": 50,
+        "lm_request_timeout_seconds": 900,
+        "lm_request_retries": 2,
+        "max_depth": 6,
+        "max_iterations": 48,
+        "compaction_threshold_pct": 0.55,
+        "output_contract_mode": "strict_repl",
+        "output_repair_attempts": 1,
+        "observability": {
+            "enabled": True,
+            "heartbeat_seconds": 10,
+            "capture_stdout_chars": 4000,
+            "capture_stderr_chars": 4000,
+            "response_preview_chars": 2000,
+        },
     },
 }
 

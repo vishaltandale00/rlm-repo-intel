@@ -2,12 +2,14 @@
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 from rich.console import Console
 from rich.progress import Progress
 
 console = Console()
+ENRICH_SLEEP_SECONDS = 0.1
 
 
 def fetch_prs(
@@ -54,6 +56,16 @@ def fetch_prs(
             if len(batch) < per_page:
                 break
             page += 1
+
+    open_pr_indices = [idx for idx, pr in enumerate(all_prs) if pr.get("state") == "open"]
+    if open_pr_indices:
+        with Progress() as progress:
+            task = progress.add_task("Enriching open PRs...", total=len(open_pr_indices))
+            for idx in open_pr_indices:
+                all_prs[idx] = _enrich_pr(owner, name, all_prs[idx])
+                progress.update(task, advance=1)
+                if ENRICH_SLEEP_SECONDS > 0:
+                    time.sleep(ENRICH_SLEEP_SECONDS)
 
     # Save as JSONL for streaming access
     jsonl_path = output_dir / "all_prs.jsonl"
@@ -129,6 +141,41 @@ def fetch_pr_diff(owner: str, name: str, pr_number: int) -> str:
     return result.stdout if result.returncode == 0 else ""
 
 
+def _enrich_pr(owner: str, name: str, pr: dict) -> dict:
+    """Fetch detail metadata and diff for a single PR."""
+    number = pr.get("number")
+    if number is None:
+        return pr
+
+    repo = f"{owner}/{name}"
+
+    detail_result = subprocess.run(
+        ["gh", "api", f"repos/{repo}/pulls/{number}"],
+        capture_output=True,
+        text=True,
+    )
+    if detail_result.returncode == 0:
+        try:
+            detail = json.loads(detail_result.stdout)
+        except json.JSONDecodeError:
+            detail = {}
+        pr["additions"] = detail.get("additions", pr.get("additions", 0))
+        pr["deletions"] = detail.get("deletions", pr.get("deletions", 0))
+        pr["changedFiles"] = detail.get(
+            "changed_files",
+            detail.get("changedFiles", pr.get("changedFiles", 0)),
+        )
+
+    diff_result = subprocess.run(
+        ["gh", "pr", "diff", str(number), "--repo", repo],
+        capture_output=True,
+        text=True,
+    )
+    pr["diff"] = diff_result.stdout if diff_result.returncode == 0 else ""
+
+    return pr
+
+
 def _normalize_pr(pr: dict) -> dict:
     """Map GitHub REST PR payload to expected ingest schema."""
     return {
@@ -149,6 +196,7 @@ def _normalize_pr(pr: dict) -> dict:
         "baseRefName": (pr.get("base") or {}).get("ref"),
         "reviewDecision": None,
         "url": pr.get("html_url"),
+        "diff": "",
     }
 
 

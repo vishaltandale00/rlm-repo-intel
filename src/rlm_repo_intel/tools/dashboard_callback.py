@@ -20,6 +20,13 @@ _latest_by_pr: dict[int, dict[str, Any]] = {}
 _latest_misc: dict[str, dict[str, Any]] = {}
 _trace_steps: list[dict[str, Any]] = []
 _active_run_id: str | None = None
+ALLOWED_TRACE_TYPES = {
+    "llm_response",
+    "code_execution",
+    "iteration_complete",
+    "subcall_start",
+    "subcall_complete",
+}
 
 
 def set_run_context(run_id: str | None) -> None:
@@ -181,7 +188,7 @@ def push_trace_step(iteration: int, type: str, content: str) -> None:
         normalized_iteration = 1
 
     step_type = str(type or "llm_response").strip().lower()
-    if step_type not in {"llm_response", "code_execution"}:
+    if step_type not in ALLOWED_TRACE_TYPES:
         step_type = "llm_response"
 
     step = {

@@ -23,6 +23,7 @@ dependencies = [
     "tree-sitter>=0.23",
     "tiktoken>=0.7",
     "numpy>=1.26",
+    "litellm>=1.81.13",
 ]
 
 [project.optional-dependencies]
