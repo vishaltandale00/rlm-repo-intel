@@ -7,6 +7,7 @@ import ast
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -29,6 +30,12 @@ from rlm_repo_intel.pipeline.rlm_session import create_frontier_rlm
 from rlm_repo_intel.prompts.prompt_registry import get_prompt_version
 from rlm_repo_intel.prompts.root_prompts import TRIAGE_TASK_PROMPT
 from rlm_repo_intel.rlm_factory import _to_litellm_model_name
+from rlm_repo_intel.tools.dashboard_callback import get_partial_progress
+
+try:
+    import psutil  # type: ignore
+except Exception:
+    psutil = None
 
 
 class OutputContractError(RuntimeError):
@@ -38,13 +45,24 @@ class OutputContractError(RuntimeError):
 _TRIAGE_RESULT_REQUIRED_FIELDS = {
     "pr_number",
     "title",
+    "author",
+    "state",
     "urgency",
     "quality",
     "criticality",
     "risk_if_merged",
     "final_score",
+    "merge_recommendation",
     "justification",
+    "key_risks",
     "evidence",
+    "scoring_reasoning",
+}
+_SCORING_REASONING_REQUIRED_FIELDS = {
+    "urgency",
+    "quality",
+    "criticality",
+    "risk_if_merged",
 }
 _TRIAGE_SUMMARY_REQUIRED_FIELDS = {
     "total_open_prs_seen",
@@ -196,6 +214,32 @@ def _contract_issues(
                 )
                 # One concrete example is enough for repair prompt clarity.
                 break
+            scoring_reasoning = item.get("scoring_reasoning")
+            if not isinstance(scoring_reasoning, dict):
+                issues.append(
+                    f"triage_results[{idx}].scoring_reasoning must be a dict with per-score rationale"
+                )
+                break
+            missing_reasoning = [
+                key
+                for key in sorted(_SCORING_REASONING_REQUIRED_FIELDS)
+                if not str(scoring_reasoning.get(key, "")).strip()
+            ]
+            if missing_reasoning:
+                issues.append(
+                    f"triage_results[{idx}].scoring_reasoning missing required keys: "
+                    + ", ".join(missing_reasoning)
+                )
+                break
+            merge_recommendation = str(item.get("merge_recommendation", "")).strip().lower()
+            if merge_recommendation != "merge_now":
+                must_fix_before_merge = [str(value).strip() for value in _to_list(item.get("must_fix_before_merge"))]
+                if not any(must_fix_before_merge):
+                    issues.append(
+                        f"triage_results[{idx}].must_fix_before_merge must be non-empty when "
+                        "merge_recommendation is not merge_now"
+                    )
+                    break
 
     if not isinstance(top_prs, list):
         issues.append("top_prs must be a list")
@@ -365,6 +409,203 @@ def _write_json_file(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2))
 
 
+def _write_text_file(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+
+
+def _append_jsonl_event(path: Path, event: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=True) + "\n")
+
+
+def _run_artifact_paths(results_dir: Path, run_id: str) -> dict[str, Any]:
+    run_dir = results_dir / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    latest_run_id_path = results_dir / "latest_run_id"
+    _write_text_file(latest_run_id_path, run_id + "\n")
+    return {
+        "run_dir": run_dir,
+        "latest_run_id_path": latest_run_id_path,
+        "output_path": run_dir / "triage.json",
+        "trace_path": run_dir / "agent_trace.txt",
+        "raw_iterations_path": run_dir / "raw_iterations.json",
+        "heartbeat_path": run_dir / "run_heartbeat.json",
+        "events_path": run_dir / "run_events.jsonl",
+        "legacy_output_path": results_dir / "triage.json",
+        "legacy_trace_path": results_dir / "agent_trace.txt",
+        "legacy_raw_iterations_path": results_dir / "raw_iterations.json",
+        "legacy_heartbeat_path": results_dir / "run_heartbeat.json",
+    }
+
+
+def _parse_iso8601(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _seconds_since(value: str | None, now: datetime) -> float:
+    parsed = _parse_iso8601(value)
+    if parsed is None:
+        return 0.0
+    return max(0.0, (now - parsed).total_seconds())
+
+
+def _new_liveness_state(started_at: datetime) -> dict[str, Any]:
+    started_iso = started_at.isoformat()
+    return {
+        "classification": "idle",
+        "last_progress_at": started_iso,
+        "seconds_since_progress": 0.0,
+        "lm": {
+            "calls_started": 0,
+            "calls_completed": 0,
+            "calls_failed": 0,
+            "calls_in_flight": 0,
+            "timeouts": 0,
+            "retries": 0,
+            "last_call_started_at": None,
+            "last_call_completed_at": None,
+            "last_call_duration_ms": None,
+            "total_call_time_ms": 0,
+        },
+        "subcalls": {
+            "started": 0,
+            "completed": 0,
+            "in_flight": 0,
+            "oldest_in_flight_seconds": 0.0,
+        },
+        "network": {
+            "samples_collected": 0,
+            "established_connections": 0,
+            "bytes_sent_delta": 0,
+            "bytes_recv_delta": 0,
+            "last_io_at": None,
+        },
+        "_subcall_started_at": [],
+        "_network_prev": None,
+    }
+
+
+def _mark_phase(state: dict[str, Any], phase: str) -> None:
+    state["phase"] = phase
+    state["phase_entered_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def _note_progress(liveness: dict[str, Any], when: str | None = None) -> None:
+    liveness["last_progress_at"] = when or datetime.now(timezone.utc).isoformat()
+
+
+def _sample_network_activity(pid: int, previous: dict[str, Any] | None) -> dict[str, Any]:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    established_connections = 0
+    bytes_sent = None
+    bytes_recv = None
+
+    if psutil is not None:
+        try:
+            proc = psutil.Process(pid)
+            connections = proc.connections(kind="tcp")
+            established_connections = sum(1 for conn in connections if conn.status == "ESTABLISHED")
+        except Exception:
+            established_connections = 0
+        try:
+            global_io = psutil.net_io_counters()
+            if global_io is not None:
+                bytes_sent = int(getattr(global_io, "bytes_sent", 0))
+                bytes_recv = int(getattr(global_io, "bytes_recv", 0))
+        except Exception:
+            bytes_sent = None
+            bytes_recv = None
+    else:
+        try:
+            result = subprocess.run(
+                ["lsof", "-nP", "-p", str(pid), "-iTCP", "-sTCP:ESTABLISHED"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2,
+            )
+            lines = [line for line in result.stdout.splitlines() if line.strip()]
+            established_connections = max(0, len(lines) - 1) if result.returncode == 0 else 0
+        except Exception:
+            established_connections = 0
+
+    prev_sent = previous.get("bytes_sent") if isinstance(previous, dict) else None
+    prev_recv = previous.get("bytes_recv") if isinstance(previous, dict) else None
+    bytes_sent_delta = (
+        max(0, int(bytes_sent - prev_sent))
+        if isinstance(bytes_sent, int) and isinstance(prev_sent, int)
+        else 0
+    )
+    bytes_recv_delta = (
+        max(0, int(bytes_recv - prev_recv))
+        if isinstance(bytes_recv, int) and isinstance(prev_recv, int)
+        else 0
+    )
+    return {
+        "timestamp": now_iso,
+        "established_connections": int(established_connections),
+        "bytes_sent": bytes_sent,
+        "bytes_recv": bytes_recv,
+        "bytes_sent_delta": int(bytes_sent_delta),
+        "bytes_recv_delta": int(bytes_recv_delta),
+    }
+
+
+def _classify_liveness(
+    phase: str,
+    liveness: dict[str, Any],
+    now: datetime,
+    stall_threshold_seconds: float,
+) -> str:
+    phase_value = str(phase or "").lower()
+    if phase_value in {"completed", "completed_local_only"}:
+        return "completed"
+    if phase_value.startswith("failed"):
+        return "failed"
+
+    lm = liveness.get("lm", {})
+    subcalls = liveness.get("subcalls", {})
+    network = liveness.get("network", {})
+
+    calls_in_flight = int(lm.get("calls_in_flight", 0))
+    subcalls_in_flight = int(subcalls.get("in_flight", 0))
+    established_connections = int(network.get("established_connections", 0))
+    bytes_sent_delta = int(network.get("bytes_sent_delta", 0))
+    bytes_recv_delta = int(network.get("bytes_recv_delta", 0))
+    seconds_since_progress = _seconds_since(str(liveness.get("last_progress_at", "")), now)
+
+    if seconds_since_progress <= 90 and (
+        int(lm.get("calls_completed", 0)) > 0
+        or int(subcalls.get("completed", 0)) > 0
+        or bytes_sent_delta > 0
+        or bytes_recv_delta > 0
+    ):
+        return "actively_reasoning"
+
+    if calls_in_flight > 0 or subcalls_in_flight > 0:
+        if seconds_since_progress >= stall_threshold_seconds:
+            return "suspected_stall"
+        if established_connections > 0 or bytes_sent_delta > 0 or bytes_recv_delta > 0:
+            return "waiting_on_provider"
+        return "waiting_on_provider"
+
+    if seconds_since_progress >= stall_threshold_seconds:
+        return "suspected_stall"
+    if phase_value in {"starting", "writing_local_artifacts"}:
+        return "actively_reasoning"
+    return "idle"
+
+
 def _heartbeat_snapshot(
     run_id: str,
     prompt_hash: str,
@@ -372,9 +613,14 @@ def _heartbeat_snapshot(
     phase: str,
     repair_attempts_used: int,
     raw_iterations: list[dict[str, Any]],
+    phase_entered_at: str | None = None,
+    liveness: dict[str, Any] | None = None,
+    progress: dict[str, Any] | None = None,
+    stall_threshold_seconds: float = 300.0,
     rlm: Any | None = None,
 ) -> dict[str, Any]:
-    elapsed = max(0.0, (datetime.now(timezone.utc) - started_at).total_seconds())
+    now = datetime.now(timezone.utc)
+    elapsed = max(0.0, (now - started_at).total_seconds())
     last_iteration_seen = 0
     last_block_seen = 0
     if raw_iterations:
@@ -400,78 +646,171 @@ def _heartbeat_snapshot(
                             last_iteration_seen = live_iteration
                             live_blocks = latest.get("code_blocks")
                             last_block_seen = len(live_blocks) if isinstance(live_blocks, list) else 0
+    liveness_payload: dict[str, Any] = {}
+    if isinstance(liveness, dict):
+        classification = _classify_liveness(
+            phase=phase,
+            liveness=liveness,
+            now=now,
+            stall_threshold_seconds=stall_threshold_seconds,
+        )
+        liveness_payload = {
+            "classification": classification,
+            "last_progress_at": liveness.get("last_progress_at"),
+            "seconds_since_progress": round(
+                _seconds_since(str(liveness.get("last_progress_at", "")), now),
+                2,
+            ),
+            "last_error_type": liveness.get("last_error_type"),
+            "last_error_message": liveness.get("last_error_message"),
+            "lm": dict(liveness.get("lm", {})),
+            "subcalls": dict(liveness.get("subcalls", {})),
+            "network": {
+                "samples_collected": int(liveness.get("network", {}).get("samples_collected", 0)),
+                "established_connections": int(
+                    liveness.get("network", {}).get("established_connections", 0)
+                ),
+                "bytes_sent_delta": int(liveness.get("network", {}).get("bytes_sent_delta", 0)),
+                "bytes_recv_delta": int(liveness.get("network", {}).get("bytes_recv_delta", 0)),
+                "last_io_at": liveness.get("network", {}).get("last_io_at"),
+            },
+        }
     return {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now.isoformat(),
         "run_id": run_id,
         "prompt_hash": prompt_hash,
         "phase": phase,
+        "phase_entered_at": phase_entered_at,
+        "phase_elapsed_seconds": round(_seconds_since(phase_entered_at, now), 2),
         "elapsed_seconds": round(elapsed, 2),
         "repair_attempts_used": repair_attempts_used,
         "last_iteration_seen": last_iteration_seen,
         "last_block_seen": last_block_seen,
+        "progress": dict(progress or {}),
+        "liveness": liveness_payload,
     }
 
 
 def _start_heartbeat_thread(
-    heartbeat_path: Path,
+    heartbeat_paths: tuple[Path, ...],
     run_id: str,
     prompt_hash: str,
     started_at: datetime,
     interval_seconds: int,
     state: dict[str, Any],
+    state_lock: threading.Lock,
+    stall_threshold_seconds: float,
+    run_events_path: Path,
     rlm: Any | None,
     stop_event: threading.Event,
 ) -> threading.Thread:
     interval = max(1, int(interval_seconds))
+    pid = os.getpid()
 
     def _loop() -> None:
         while not stop_event.is_set():
-            snapshot = _heartbeat_snapshot(
-                run_id=run_id,
-                prompt_hash=prompt_hash,
-                started_at=started_at,
-                phase=str(state.get("phase", "unknown")),
-                repair_attempts_used=int(state.get("repair_attempts_used", 0)),
-                raw_iterations=list(state.get("raw_iterations", [])),
-                rlm=rlm,
-            )
-            try:
-                _write_json_file(heartbeat_path, snapshot)
-            except OSError:
-                pass
+            with state_lock:
+                liveness = state.get("liveness")
+                if isinstance(liveness, dict):
+                    subcalls = liveness.get("subcalls")
+                    starts = liveness.get("_subcall_started_at")
+                    if isinstance(subcalls, dict) and isinstance(starts, list):
+                        if starts:
+                            oldest_seconds = max(0.0, _seconds_since(str(starts[0]), datetime.now(timezone.utc)))
+                        else:
+                            oldest_seconds = 0.0
+                        subcalls["oldest_in_flight_seconds"] = round(oldest_seconds, 2)
+                    network = liveness.get("network")
+                    if isinstance(network, dict):
+                        sample = _sample_network_activity(
+                            pid=pid,
+                            previous=liveness.get("_network_prev"),
+                        )
+                        network["samples_collected"] = int(network.get("samples_collected", 0)) + 1
+                        network["established_connections"] = int(sample["established_connections"])
+                        network["bytes_sent_delta"] = int(sample["bytes_sent_delta"])
+                        network["bytes_recv_delta"] = int(sample["bytes_recv_delta"])
+                        if sample["bytes_sent_delta"] > 0 or sample["bytes_recv_delta"] > 0:
+                            network["last_io_at"] = sample["timestamp"]
+                            _note_progress(liveness, sample["timestamp"])
+                        liveness["_network_prev"] = sample
+                state["progress"] = get_partial_progress()
+                snapshot = _heartbeat_snapshot(
+                    run_id=run_id,
+                    prompt_hash=prompt_hash,
+                    started_at=started_at,
+                    phase=str(state.get("phase", "unknown")),
+                    phase_entered_at=state.get("phase_entered_at"),
+                    repair_attempts_used=int(state.get("repair_attempts_used", 0)),
+                    raw_iterations=list(state.get("raw_iterations", [])),
+                    liveness=dict(state.get("liveness", {})),
+                    progress=dict(state.get("progress", {})),
+                    stall_threshold_seconds=stall_threshold_seconds,
+                    rlm=rlm,
+                )
+            for heartbeat_path in heartbeat_paths:
+                try:
+                    _write_json_file(heartbeat_path, snapshot)
+                except OSError:
+                    pass
             if stop_event.wait(interval):
                 break
 
     thread = threading.Thread(target=_loop, name="triage-heartbeat", daemon=True)
     thread.start()
+    _append_jsonl_event(
+        run_events_path,
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": run_id,
+            "event": "heartbeat_started",
+        },
+    )
     return thread
 
 
 def _stop_heartbeat_thread(
-    heartbeat_path: Path,
+    heartbeat_paths: tuple[Path, ...],
     run_id: str,
     prompt_hash: str,
     started_at: datetime,
     state: dict[str, Any],
+    state_lock: threading.Lock,
+    stall_threshold_seconds: float,
+    run_events_path: Path,
     stop_event: threading.Event,
     thread: threading.Thread | None,
 ) -> None:
-    snapshot = _heartbeat_snapshot(
-        run_id=run_id,
-        prompt_hash=prompt_hash,
-        started_at=started_at,
-        phase=str(state.get("phase", "stopped")),
-        repair_attempts_used=int(state.get("repair_attempts_used", 0)),
-        raw_iterations=list(state.get("raw_iterations", [])),
-        rlm=None,
-    )
-    try:
-        _write_json_file(heartbeat_path, snapshot)
-    except OSError:
-        pass
+    with state_lock:
+        snapshot = _heartbeat_snapshot(
+            run_id=run_id,
+            prompt_hash=prompt_hash,
+            started_at=started_at,
+            phase=str(state.get("phase", "stopped")),
+            phase_entered_at=state.get("phase_entered_at"),
+            repair_attempts_used=int(state.get("repair_attempts_used", 0)),
+            raw_iterations=list(state.get("raw_iterations", [])),
+            liveness=dict(state.get("liveness", {})),
+            progress=dict(state.get("progress", {})),
+            stall_threshold_seconds=stall_threshold_seconds,
+            rlm=None,
+        )
+    for heartbeat_path in heartbeat_paths:
+        try:
+            _write_json_file(heartbeat_path, snapshot)
+        except OSError:
+            pass
     stop_event.set()
     if thread is not None:
         thread.join(timeout=2)
+    _append_jsonl_event(
+        run_events_path,
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": run_id,
+            "event": "heartbeat_stopped",
+        },
+    )
 
 
 def _extract_triage_results_from_repl(rlm: Any) -> Any | None:
@@ -570,7 +909,7 @@ def _extract_title_theme(title: str) -> str | None:
     if conventional:
         return f"{conventional.group(1)}({conventional.group(2)})"
 
-    fallback = re.match(r"^([a-z]+)[:\\s\\-_/]+([a-z0-9_\\-/]+)", text)
+    fallback = re.match(r"^([a-z]+)[:\s_/-]+([a-z0-9_/-]+)", text)
     if fallback:
         return f"{fallback.group(1)}({fallback.group(2).split('/')[0]})"
 
@@ -601,6 +940,19 @@ def _find_eval_candidates(obj: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _normalize_scoring_reasoning(raw_scoring_reasoning: Any) -> dict[str, str] | None:
+    if not isinstance(raw_scoring_reasoning, dict):
+        return None
+    normalized: dict[str, str] = {}
+    for key, value in raw_scoring_reasoning.items():
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            normalized[str(key)] = text
+    return normalized
+
+
 def _normalize_eval(raw: dict[str, Any]) -> dict[str, Any]:
     pr_number = raw.get("pr_number", raw.get("number", 0))
     title = raw.get("title", "(untitled PR)")
@@ -620,7 +972,10 @@ def _normalize_eval(raw: dict[str, Any]) -> dict[str, Any]:
     key_risks = [str(item) for item in _to_list(raw.get("key_risks", []))]
     must_fix_before_merge = [str(item) for item in _to_list(raw.get("must_fix_before_merge", []))]
     merge_recommendation = str(raw.get("merge_recommendation", raw.get("verdict", ""))).strip()
+    scoring_reasoning_raw = raw.get("scoring_reasoning")
+    scoring_reasoning = _normalize_scoring_reasoning(scoring_reasoning_raw)
 
+    # Do not invent model reasoning here; normalization is shape/type canonicalization only.
     normalized = {
         "pr_number": int(_to_float(pr_number, 0)),
         "title": str(title),
@@ -648,6 +1003,11 @@ def _normalize_eval(raw: dict[str, Any]) -> dict[str, Any]:
         "linked_issues": [int(_to_float(item, 0)) for item in _to_list(linked_issues)],
         "agent_traces": raw.get("agent_traces", raw.get("agent_outputs", {})),
     }
+
+    if scoring_reasoning is not None:
+        normalized["scoring_reasoning"] = scoring_reasoning
+    elif scoring_reasoning_raw is not None:
+        normalized["scoring_reasoning"] = scoring_reasoning_raw
 
     if raw.get("state") is not None:
         normalized["state"] = str(raw.get("state"))
@@ -968,14 +1328,15 @@ def main(config: dict[str, Any] | None = None):
         "total_prs_scored": 0,
     }
     results_dir = Path(config["paths"]["results_dir"])
-    output_path = results_dir / "triage.json"
-    trace_path = results_dir / "agent_trace.txt"
-    raw_iterations_path = results_dir / "raw_iterations.json"
-    heartbeat_path = results_dir / "run_heartbeat.json"
     results_dir.mkdir(parents=True, exist_ok=True)
 
     observability = _observability_cfg(config)
     observability_enabled = bool(observability.get("enabled", True))
+
+    pipeline_cfg = config.get("pipeline", {})
+    lm_request_timeout = float(pipeline_cfg.get("lm_request_timeout_seconds", 900.0))
+    lm_request_retries = int(pipeline_cfg.get("lm_request_retries", 2))
+    stall_threshold_seconds = max(300.0, lm_request_timeout * max(1, lm_request_retries + 1))
 
     database_url = os.getenv("DATABASE_URL")
     run_id = local_run_id
@@ -988,8 +1349,113 @@ def main(config: dict[str, Any] | None = None):
         except Exception as exc:
             print(f"Failed to initialize run on dashboard: {exc}. Continuing with local run ID {run_id}.")
 
+    run_metadata["id"] = run_id
+    artifacts = _run_artifact_paths(results_dir=results_dir, run_id=run_id)
+    output_path: Path = artifacts["output_path"]
+    trace_path: Path = artifacts["trace_path"]
+    raw_iterations_path: Path = artifacts["raw_iterations_path"]
+    heartbeat_path: Path = artifacts["heartbeat_path"]
+    events_path: Path = artifacts["events_path"]
+    legacy_output_path: Path = artifacts["legacy_output_path"]
+    legacy_trace_path: Path = artifacts["legacy_trace_path"]
+    legacy_raw_iterations_path: Path = artifacts["legacy_raw_iterations_path"]
+    legacy_heartbeat_path: Path = artifacts["legacy_heartbeat_path"]
+    heartbeat_paths = (heartbeat_path, legacy_heartbeat_path)
+
+    _append_jsonl_event(
+        events_path,
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": run_id,
+            "event": "run_started",
+            "prompt_hash": prompt_hash,
+        },
+    )
+
+    raw_iterations: list[dict[str, Any]] = []
+    state_lock = threading.Lock()
+    heartbeat_state: dict[str, Any] = {
+        "phase": "starting",
+        "phase_entered_at": start_time.isoformat(),
+        "repair_attempts_used": 0,
+        "raw_iterations": raw_iterations,
+        "liveness": _new_liveness_state(start_time),
+        "progress": get_partial_progress(),
+    }
+
+    def _telemetry_lm_start(payload: dict[str, Any]) -> None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with state_lock:
+            liveness = heartbeat_state.get("liveness", {})
+            lm = liveness.get("lm", {})
+            lm["calls_started"] = int(lm.get("calls_started", 0)) + 1
+            lm["calls_in_flight"] = int(lm.get("calls_in_flight", 0)) + 1
+            lm["last_call_started_at"] = now_iso
+            lm["retries"] = int(lm.get("retries", 0)) + int(payload.get("num_retries", 0) or 0)
+
+    def _telemetry_lm_success(payload: dict[str, Any]) -> None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        duration_ms = max(0, int(payload.get("duration_ms", 0) or 0))
+        with state_lock:
+            liveness = heartbeat_state.get("liveness", {})
+            lm = liveness.get("lm", {})
+            lm["calls_completed"] = int(lm.get("calls_completed", 0)) + 1
+            lm["calls_in_flight"] = max(0, int(lm.get("calls_in_flight", 0)) - 1)
+            lm["last_call_completed_at"] = now_iso
+            lm["last_call_duration_ms"] = duration_ms
+            lm["total_call_time_ms"] = int(lm.get("total_call_time_ms", 0)) + duration_ms
+            _note_progress(liveness, now_iso)
+
+    def _telemetry_lm_failure(payload: dict[str, Any]) -> None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        duration_ms = max(0, int(payload.get("duration_ms", 0) or 0))
+        with state_lock:
+            liveness = heartbeat_state.get("liveness", {})
+            lm = liveness.get("lm", {})
+            lm["calls_failed"] = int(lm.get("calls_failed", 0)) + 1
+            lm["calls_in_flight"] = max(0, int(lm.get("calls_in_flight", 0)) - 1)
+            lm["last_call_completed_at"] = now_iso
+            lm["last_call_duration_ms"] = duration_ms
+            lm["total_call_time_ms"] = int(lm.get("total_call_time_ms", 0)) + duration_ms
+            if bool(payload.get("is_timeout", False)):
+                lm["timeouts"] = int(lm.get("timeouts", 0)) + 1
+            _note_progress(liveness, now_iso)
+
+    def _telemetry_subcall_start(payload: dict[str, Any]) -> None:
+        del payload
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with state_lock:
+            liveness = heartbeat_state.get("liveness", {})
+            subcalls = liveness.get("subcalls", {})
+            starts = liveness.get("_subcall_started_at", [])
+            subcalls["started"] = int(subcalls.get("started", 0)) + 1
+            subcalls["in_flight"] = int(subcalls.get("in_flight", 0)) + 1
+            if isinstance(starts, list):
+                starts.append(now_iso)
+
+    def _telemetry_subcall_complete(payload: dict[str, Any]) -> None:
+        del payload
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with state_lock:
+            liveness = heartbeat_state.get("liveness", {})
+            subcalls = liveness.get("subcalls", {})
+            starts = liveness.get("_subcall_started_at", [])
+            subcalls["completed"] = int(subcalls.get("completed", 0)) + 1
+            subcalls["in_flight"] = max(0, int(subcalls.get("in_flight", 0)) - 1)
+            if isinstance(starts, list) and starts:
+                starts.pop(0)
+            _note_progress(liveness, now_iso)
+
+    telemetry_hooks = {
+        "lm_start": _telemetry_lm_start,
+        "lm_success": _telemetry_lm_success,
+        "lm_failure": _telemetry_lm_failure,
+        "subcall_start": _telemetry_subcall_start,
+        "subcall_complete": _telemetry_subcall_complete,
+    }
+
     print("Creating frontier RLM...")
-    rlm = create_frontier_rlm(config, run_id=run_id)
+    rlm = create_frontier_rlm(config, run_id=run_id, telemetry_hooks=telemetry_hooks)
     prompt = TRIAGE_TASK_PROMPT
 
     print(f"Running RLM with prompt: {prompt}")
@@ -998,57 +1464,96 @@ def main(config: dict[str, Any] | None = None):
     contract_mode = _output_contract_mode(config)
     max_repair_attempts = _output_repair_attempts(config)
     strict_repl_mode = contract_mode == "strict_repl"
-    raw_iterations: list[dict[str, Any]] = []
-    heartbeat_state: dict[str, Any] = {
-        "phase": "starting",
-        "repair_attempts_used": 0,
-        "raw_iterations": raw_iterations,
-    }
     heartbeat_stop = threading.Event()
     heartbeat_thread: threading.Thread | None = None
     if observability_enabled:
         heartbeat_thread = _start_heartbeat_thread(
-            heartbeat_path=heartbeat_path,
+            heartbeat_paths=heartbeat_paths,
             run_id=run_id,
             prompt_hash=prompt_hash,
             started_at=start_time,
             interval_seconds=int(observability.get("heartbeat_seconds", 10)),
             state=heartbeat_state,
+            state_lock=state_lock,
+            stall_threshold_seconds=stall_threshold_seconds,
+            run_events_path=events_path,
             rlm=rlm,
             stop_event=heartbeat_stop,
         )
 
-    heartbeat_state["phase"] = "waiting_first_response"
+    with state_lock:
+        _mark_phase(heartbeat_state, "waiting_first_response")
+    _append_jsonl_event(
+        events_path,
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": run_id,
+            "event": "root_turn_started",
+            "turn": 1,
+        },
+    )
     print("Starting root LM turn 1...")
     root_start = time.perf_counter()
     try:
         result = rlm.completion(prompt)
-    except Exception:
-        heartbeat_state["phase"] = "failed_root_completion"
+    except Exception as exc:
+        with state_lock:
+            _mark_phase(heartbeat_state, "failed_root_completion")
+            liveness = heartbeat_state.get("liveness", {})
+            liveness["last_error_type"] = type(exc).__name__
+            liveness["last_error_message"] = str(exc)
+        _append_jsonl_event(
+            events_path,
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "run_id": run_id,
+                "event": "run_failed",
+                "phase": "failed_root_completion",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
         if observability_enabled and not heartbeat_stop.is_set():
             _stop_heartbeat_thread(
-                heartbeat_path=heartbeat_path,
+                heartbeat_paths=heartbeat_paths,
                 run_id=run_id,
                 prompt_hash=prompt_hash,
                 started_at=start_time,
                 state=heartbeat_state,
+                state_lock=state_lock,
+                stall_threshold_seconds=stall_threshold_seconds,
+                run_events_path=events_path,
                 stop_event=heartbeat_stop,
                 thread=heartbeat_thread,
             )
         raise
     final_result = result
     root_elapsed = time.perf_counter() - root_start
+    _append_jsonl_event(
+        events_path,
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": run_id,
+            "event": "root_turn_completed",
+            "turn": 1,
+            "duration_seconds": round(root_elapsed, 3),
+        },
+    )
     print(f"Root LM turn 1 returned in {root_elapsed:.2f}s")
-    raw_iterations.extend(_extract_raw_iterations(result, "root", observability))
-    heartbeat_state["phase"] = "root_completion_received"
+    with state_lock:
+        raw_iterations.extend(_extract_raw_iterations(result, "root", observability))
+        _mark_phase(heartbeat_state, "root_completion_received")
+        _note_progress(heartbeat_state.get("liveness", {}))
     contract_state = _extract_contract_from_repl(rlm)
     repair_attempts_used = 0
 
     while contract_state["issues"] and repair_attempts_used < max_repair_attempts:
         repair_attempts_used += 1
-        heartbeat_state["repair_attempts_used"] = repair_attempts_used
+        with state_lock:
+            heartbeat_state["repair_attempts_used"] = repair_attempts_used
         repair_prompt = _build_repair_prompt(contract_state["issues"])
-        heartbeat_state["phase"] = f"repairing_{repair_attempts_used}"
+        with state_lock:
+            _mark_phase(heartbeat_state, f"repairing_{repair_attempts_used}")
         print(f"Starting repair LM turn {repair_attempts_used}...")
         repair_start = time.perf_counter()
         repair_result = rlm.completion(repair_prompt)
@@ -1057,11 +1562,14 @@ def main(config: dict[str, Any] | None = None):
         print(f"Repair LM turn {repair_attempts_used} returned in {repair_elapsed:.2f}s")
         response_text = _extract_response_text(repair_result)
         result_payload = _parse_result_payload(repair_result)
-        raw_iterations.extend(
-            _extract_raw_iterations(repair_result, f"repair_{repair_attempts_used}", observability)
-        )
+        with state_lock:
+            raw_iterations.extend(
+                _extract_raw_iterations(repair_result, f"repair_{repair_attempts_used}", observability)
+            )
+            _note_progress(heartbeat_state.get("liveness", {}))
         contract_state = _extract_contract_from_repl(rlm)
-        heartbeat_state["phase"] = "repair_completion_received"
+        with state_lock:
+            _mark_phase(heartbeat_state, "repair_completion_received")
 
     response_text = _extract_response_text(final_result)
     result_payload = _parse_result_payload(final_result)
@@ -1108,14 +1616,16 @@ def main(config: dict[str, Any] | None = None):
             "valid": len(contract_state.get("issues", [])) == 0,
         },
     }
-    heartbeat_state["phase"] = "writing_local_artifacts"
+    with state_lock:
+        _mark_phase(heartbeat_state, "writing_local_artifacts")
 
     print("=" * 80)
     print("RLM RESULT:")
     print(response_text)
 
     # Save local backup first.
-    trace_path.write_text(response_text)
+    _write_text_file(trace_path, response_text)
+    _write_text_file(legacy_trace_path, response_text)
     raw_iterations_payload = {
         "run_id": run_id,
         "prompt_hash": prompt_hash,
@@ -1123,14 +1633,18 @@ def main(config: dict[str, Any] | None = None):
         "iterations": raw_iterations,
     }
     _write_json_file(raw_iterations_path, raw_iterations_payload)
+    _write_json_file(legacy_raw_iterations_path, raw_iterations_payload)
 
     try:
         if isinstance(output_bundle, (dict, list)):
-            output_path.write_text(json.dumps(output_bundle, indent=2))
+            _write_json_file(output_path, output_bundle)
+            _write_json_file(legacy_output_path, output_bundle)
         else:
-            output_path.write_text(str(output_bundle))
+            _write_text_file(output_path, str(output_bundle))
+            _write_text_file(legacy_output_path, str(output_bundle))
     except (json.JSONDecodeError, TypeError):
-        output_path.write_text(str(final_result))
+        _write_text_file(output_path, str(final_result))
+        _write_text_file(legacy_output_path, str(final_result))
 
     print(f"\nResults saved to {output_path}")
     print(f"Agent trace saved to {trace_path}")
@@ -1139,14 +1653,18 @@ def main(config: dict[str, Any] | None = None):
 
     if strict_repl_mode and contract_state["issues"]:
         issues_text = "; ".join(contract_state["issues"])
-        heartbeat_state["phase"] = "failed_contract"
+        with state_lock:
+            _mark_phase(heartbeat_state, "failed_contract")
         if observability_enabled:
             _stop_heartbeat_thread(
-                heartbeat_path=heartbeat_path,
+                heartbeat_paths=heartbeat_paths,
                 run_id=run_id,
                 prompt_hash=prompt_hash,
                 started_at=start_time,
                 state=heartbeat_state,
+                state_lock=state_lock,
+                stall_threshold_seconds=stall_threshold_seconds,
+                run_events_path=events_path,
                 stop_event=heartbeat_stop,
                 thread=heartbeat_thread,
             )
@@ -1156,20 +1674,35 @@ def main(config: dict[str, Any] | None = None):
         )
 
     if not database_url:
-        heartbeat_state["phase"] = "completed_local_only"
+        with state_lock:
+            _mark_phase(heartbeat_state, "completed_local_only")
+            _note_progress(heartbeat_state.get("liveness", {}))
         if observability_enabled:
             _stop_heartbeat_thread(
-                heartbeat_path=heartbeat_path,
+                heartbeat_paths=heartbeat_paths,
                 run_id=run_id,
                 prompt_hash=prompt_hash,
                 started_at=start_time,
                 state=heartbeat_state,
+                state_lock=state_lock,
+                stall_threshold_seconds=stall_threshold_seconds,
+                run_events_path=events_path,
                 stop_event=heartbeat_stop,
                 thread=heartbeat_thread,
             )
+        _append_jsonl_event(
+            events_path,
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "run_id": run_id,
+                "event": "run_completed_local_only",
+            },
+        )
         print("DATABASE_URL not set, skipping dashboard push.")
         return
 
+    with state_lock:
+        _mark_phase(heartbeat_state, "pushing_dashboard")
     evaluations_raw = _to_list(triage_results_payload)
     evaluations = [_normalize_eval(item) for item in evaluations_raw if isinstance(item, dict)]
     top_prs_raw = _to_list(top_prs_payload)
@@ -1183,6 +1716,8 @@ def main(config: dict[str, Any] | None = None):
         for evaluation in evaluations:
             push_evaluation(evaluation, run_id=run_id)
         push_summary(summary, run_id=run_id)
+        with state_lock:
+            _note_progress(heartbeat_state.get("liveness", {}))
         print(f"Pushed {len(evaluations)} evaluations and summary to dashboard DB.")
     except Exception as exc:
         print(f"Dashboard push failed: {exc}. Local backup is still saved.")
@@ -1193,6 +1728,8 @@ def main(config: dict[str, Any] | None = None):
     try:
         push_clusters(clusters, run_id=run_id)
         push_ranking(ranking, run_id=run_id)
+        with state_lock:
+            _note_progress(heartbeat_state.get("liveness", {}))
         print(
             f"Pushed {len(clusters)} clusters and {len(ranking.get('ranking', []))} ranked PRs to dashboard DB."
         )
@@ -1201,6 +1738,8 @@ def main(config: dict[str, Any] | None = None):
 
     try:
         push_trace(trace_steps, run_id=run_id)
+        with state_lock:
+            _note_progress(heartbeat_state.get("liveness", {}))
         print(f"Pushed {len(trace_steps)} agent trace steps to dashboard DB.")
     except Exception as exc:
         print(f"Dashboard trace push failed: {exc}. Local backup is still saved.")
@@ -1223,17 +1762,117 @@ def main(config: dict[str, Any] | None = None):
     except Exception as exc:
         print(f"Dashboard run-finalization push failed: {exc}.")
 
-    heartbeat_state["phase"] = "completed"
+    with state_lock:
+        _mark_phase(heartbeat_state, "completed")
+        _note_progress(heartbeat_state.get("liveness", {}))
     if observability_enabled:
         _stop_heartbeat_thread(
-            heartbeat_path=heartbeat_path,
+            heartbeat_paths=heartbeat_paths,
             run_id=run_id,
             prompt_hash=prompt_hash,
             started_at=start_time,
             state=heartbeat_state,
+            state_lock=state_lock,
+            stall_threshold_seconds=stall_threshold_seconds,
+            run_events_path=events_path,
             stop_event=heartbeat_stop,
             thread=heartbeat_thread,
         )
+    _append_jsonl_event(
+        events_path,
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": run_id,
+            "event": "run_completed",
+            "total_prs_seen": len(evaluations_raw),
+            "total_prs_scored": len(evaluations),
+        },
+    )
+
+
+def _resolve_latest_run_id(results_dir: Path) -> str | None:
+    latest_run_path = results_dir / "latest_run_id"
+    if latest_run_path.exists():
+        latest = latest_run_path.read_text().strip()
+        if latest:
+            return latest
+    legacy_heartbeat_path = results_dir / "run_heartbeat.json"
+    if legacy_heartbeat_path.exists():
+        try:
+            payload = json.loads(legacy_heartbeat_path.read_text())
+        except json.JSONDecodeError:
+            return None
+        run_id = str(payload.get("run_id", "")).strip()
+        return run_id or None
+    return None
+
+
+def triage_status(config: dict[str, Any] | None = None, run_id: str | None = None) -> dict[str, Any]:
+    if config is None:
+        config = load_config("rlm-repo-intel.yaml")
+    results_dir = Path(config["paths"]["results_dir"])
+    selected_run_id = run_id.strip() if isinstance(run_id, str) and run_id.strip() else None
+    if not selected_run_id:
+        selected_run_id = _resolve_latest_run_id(results_dir)
+    if not selected_run_id:
+        return {
+            "run_id": None,
+            "status": "unavailable",
+            "message": "No run ID found. Start triage first.",
+            "exit_code": 5,
+        }
+
+    run_heartbeat_path = results_dir / "runs" / selected_run_id / "run_heartbeat.json"
+    legacy_heartbeat_path = results_dir / "run_heartbeat.json"
+    heartbeat_path = run_heartbeat_path if run_heartbeat_path.exists() else legacy_heartbeat_path
+    if not heartbeat_path.exists():
+        return {
+            "run_id": selected_run_id,
+            "status": "unavailable",
+            "message": f"Heartbeat not found for run {selected_run_id}",
+            "heartbeat_path": str(heartbeat_path),
+            "exit_code": 5,
+        }
+
+    try:
+        heartbeat = json.loads(heartbeat_path.read_text())
+    except json.JSONDecodeError:
+        return {
+            "run_id": selected_run_id,
+            "status": "unavailable",
+            "message": f"Heartbeat is invalid JSON at {heartbeat_path}",
+            "heartbeat_path": str(heartbeat_path),
+            "exit_code": 5,
+        }
+
+    phase = str(heartbeat.get("phase", "unknown"))
+    liveness = heartbeat.get("liveness", {}) if isinstance(heartbeat.get("liveness"), dict) else {}
+    classification = str(liveness.get("classification", "idle"))
+    recommendations = {
+        "completed": "Run completed successfully.",
+        "failed": "Run failed. Check trace and raw iterations for error context.",
+        "suspected_stall": "Likely stalled. Inspect provider/network logs or restart run.",
+        "waiting_on_provider": "Still waiting on upstream provider response.",
+        "actively_reasoning": "Run is actively making progress.",
+        "idle": "Run is alive but currently idle.",
+    }
+    exit_code_map = {
+        "completed": 0,
+        "failed": 4,
+        "suspected_stall": 3,
+    }
+    return {
+        "run_id": selected_run_id,
+        "phase": phase,
+        "classification": classification,
+        "elapsed_seconds": heartbeat.get("elapsed_seconds"),
+        "last_iteration_seen": heartbeat.get("last_iteration_seen"),
+        "last_block_seen": heartbeat.get("last_block_seen"),
+        "heartbeat_path": str(heartbeat_path),
+        "recommendation": recommendations.get(classification, "Run status is available."),
+        "heartbeat": heartbeat,
+        "exit_code": int(exit_code_map.get(classification, 2)),
+    }
 
 
 if __name__ == "__main__":

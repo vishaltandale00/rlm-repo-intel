@@ -11,6 +11,13 @@ export interface AgentTraces {
   disagreement_points?: string[];
 }
 
+export interface ScoreReasoning {
+  urgency?: string;
+  quality?: string;
+  criticality?: string;
+  risk_if_merged?: string;
+}
+
 export interface EvaluationItem {
   pr_number: number;
   title: string;
@@ -32,6 +39,7 @@ export interface EvaluationItem {
   impact_scope?: string[];
   novelty_score?: number;
   agent_traces?: AgentTraces;
+  scoring_reasoning?: ScoreReasoning;
 }
 
 export interface RankingData {

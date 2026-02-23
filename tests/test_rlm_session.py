@@ -2,6 +2,8 @@ import json
 import sys
 import types
 
+import pytest
+
 if "litellm" not in sys.modules:
     async def _dummy_acompletion(**kwargs):  # pragma: no cover - test shim
         raise RuntimeError("not used")
@@ -41,6 +43,10 @@ def _base_config(tmp_path):
             "lm_request_retries": 6,
             "max_depth": 5,
             "max_iterations": 6,
+            "subtask_max_depth": 2,
+            "subtask_max_iterations": 12,
+            "subtask_timeout_seconds": 300,
+            "subtask_budget_pct": 0.6,
             "compaction_threshold_pct": 0.42,
         },
     }
@@ -78,7 +84,26 @@ def test_create_frontier_rlm_uses_pipeline_and_loads_graph(tmp_path, monkeypatch
     assert kwargs["max_depth"] == 5
     assert kwargs["max_iterations"] == 6
     assert kwargs["compaction_threshold_pct"] == 0.42
-    assert kwargs["custom_tools"]["structural_graph"]["nodes"][0]["id"] == "file:src/a.py"
+    assert set(kwargs["custom_tools"].keys()) == {
+        "ROLE_SYSTEM",
+        "ROLE_MODEL",
+        "SUBTASK_LIMITS",
+        "push_partial_results",
+        "push_trace_step",
+    }
+    assert kwargs["custom_tools"]["SUBTASK_LIMITS"] == {
+        "max_depth": 2,
+        "max_iterations": 12,
+        "timeout_seconds": 300,
+        "budget_pct": 0.6,
+    }
+    assert kwargs["custom_sub_tools"]["structural_graph"]["nodes"][0]["id"] == "file:src/a.py"
+    assert kwargs["custom_sub_tools"]["repo"]["src/a.py"] == "print('x')"
+    assert kwargs["custom_sub_tools"]["repo_tree"] == "src/\n  a.py"
+    assert kwargs["custom_sub_tools"]["prs"] == [{"number": 1, "state": "open"}]
+    assert kwargs["custom_sub_tools"]["pr_table"] == "pr_table"
+    assert kwargs["custom_sub_tools"]["issue_table"] == "issue_table"
+    assert "structural_graph" not in kwargs["custom_tools"]
     assert callable(kwargs["on_iteration_complete"])
     assert callable(kwargs["on_subcall_start"])
     assert callable(kwargs["on_subcall_complete"])
@@ -94,7 +119,17 @@ def test_create_frontier_rlm_handles_missing_graph_and_prefixed_model(tmp_path, 
 
     assert kwargs["backend_kwargs"]["model_name"] == "anthropic/claude-opus-4-6"
     assert "extra_headers" not in kwargs["backend_kwargs"]
-    assert kwargs["custom_tools"]["structural_graph"] == {}
+    assert kwargs["custom_sub_tools"]["structural_graph"] == {}
+    assert "structural_graph" not in kwargs["custom_tools"]
+
+
+def test_create_frontier_rlm_requires_subtask_limits(tmp_path, monkeypatch):
+    _patch_session_dependencies(monkeypatch)
+    config = _base_config(tmp_path)
+    del config["pipeline"]["subtask_budget_pct"]
+
+    with pytest.raises(KeyError, match="Missing pipeline subtask settings"):
+        rlm_session.create_frontier_rlm(config, run_id="run-3")
 
 
 def test_patch_local_repl_safe_builtins_enables_globals_and_locals():

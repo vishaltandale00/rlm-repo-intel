@@ -33,6 +33,10 @@ def test_load_config_merges_and_creates_directories(tmp_path, monkeypatch):
     assert config["pipeline"]["max_errors"] == 50
     assert config["pipeline"]["lm_request_timeout_seconds"] == 900
     assert config["pipeline"]["lm_request_retries"] == 2
+    assert config["pipeline"]["subtask_max_depth"] == 2
+    assert config["pipeline"]["subtask_max_iterations"] == 12
+    assert config["pipeline"]["subtask_timeout_seconds"] == 300
+    assert config["pipeline"]["subtask_budget_pct"] == 0.60
     assert config["pipeline"]["output_contract_mode"] == "strict_repl"
     assert config["pipeline"]["output_repair_attempts"] == 1
     assert config["pipeline"]["observability"]["enabled"] is True
@@ -68,6 +72,10 @@ def test_load_config_allows_pipeline_overrides(tmp_path, monkeypatch):
                     "lm_request_retries": 5,
                     "max_depth": 4,
                     "max_iterations": 9,
+                    "subtask_max_depth": 1,
+                    "subtask_max_iterations": 7,
+                    "subtask_timeout_seconds": 180,
+                    "subtask_budget_pct": 0.45,
                     "compaction_threshold_pct": 0.44,
                     "output_contract_mode": "hybrid",
                     "output_repair_attempts": 2,
@@ -92,6 +100,10 @@ def test_load_config_allows_pipeline_overrides(tmp_path, monkeypatch):
     assert config["pipeline"]["lm_request_retries"] == 5
     assert config["pipeline"]["max_depth"] == 4
     assert config["pipeline"]["max_iterations"] == 9
+    assert config["pipeline"]["subtask_max_depth"] == 1
+    assert config["pipeline"]["subtask_max_iterations"] == 7
+    assert config["pipeline"]["subtask_timeout_seconds"] == 180
+    assert config["pipeline"]["subtask_budget_pct"] == 0.45
     assert config["pipeline"]["compaction_threshold_pct"] == 0.44
     assert config["pipeline"]["output_contract_mode"] == "hybrid"
     assert config["pipeline"]["output_repair_attempts"] == 2

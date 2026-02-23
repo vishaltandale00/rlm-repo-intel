@@ -7,9 +7,13 @@ def test_root_prompt_contains_required_goal_contract_and_safety():
     assert "triage_summary" in ROOT_FRONTIER_PROMPT
     assert "triage_bundle" in ROOT_FRONTIER_PROMPT
     assert "DEFENSIVE EXECUTION" in ROOT_FRONTIER_PROMPT
+    assert "Operating model (paper-aligned)" in ROOT_FRONTIER_PROMPT
     assert "def role_query(" in ROOT_FRONTIER_PROMPT
+    assert "mode: str = \"rlm\"" in ROOT_FRONTIER_PROMPT
     assert "FINAL_VAR(\"triage_bundle\")" in ROOT_FRONTIER_PROMPT
-    assert "{custom_tools_section}" not in ROOT_FRONTIER_PROMPT
+    assert "{custom_tools_section}" in ROOT_FRONTIER_PROMPT
+    assert "scoring_reasoning" in ROOT_FRONTIER_PROMPT
+    assert "urgency, quality, criticality, risk_if_merged" in ROOT_FRONTIER_PROMPT
 
 
 def test_role_maps_match_dashboard_agent_keys():
@@ -21,10 +25,12 @@ def test_role_maps_match_dashboard_agent_keys():
 
 def test_triage_task_prompt_is_goal_oriented():
     assert "Triage all open PRs" in TRIAGE_TASK_PROMPT
+    assert "delegation-first RLM flow" in TRIAGE_TASK_PROMPT
     assert "triage_bundle" in TRIAGE_TASK_PROMPT
     assert "FINAL_VAR(\"triage_bundle\")" in TRIAGE_TASK_PROMPT
 
 
 def test_root_prompt_is_safe_for_custom_tools_formatting():
-    rendered = ROOT_FRONTIER_PROMPT.format(custom_tools_section="")
+    rendered = ROOT_FRONTIER_PROMPT.format(custom_tools_section="- repo")
     assert "Root Repository Intelligence Model" in rendered
+    assert "- repo" in rendered

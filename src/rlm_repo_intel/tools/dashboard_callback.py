@@ -20,6 +20,8 @@ _latest_by_pr: dict[int, dict[str, Any]] = {}
 _latest_misc: dict[str, dict[str, Any]] = {}
 _trace_steps: list[dict[str, Any]] = []
 _active_run_id: str | None = None
+_partial_push_count: int = 0
+_last_partial_push_at: str | None = None
 ALLOWED_TRACE_TYPES = {
     "llm_response",
     "code_execution",
@@ -44,6 +46,17 @@ def reset_run_state() -> None:
     _latest_by_pr.clear()
     _latest_misc.clear()
     _trace_steps.clear()
+    global _partial_push_count, _last_partial_push_at
+    _partial_push_count = 0
+    _last_partial_push_at = None
+
+
+def get_partial_progress() -> dict[str, Any]:
+    return {
+        "partial_push_count": int(_partial_push_count),
+        "partial_unique_prs": len(_pushed_pr_numbers),
+        "last_partial_push_at": _last_partial_push_at,
+    }
 
 
 def _ensure_parent(path: Path) -> None:
@@ -55,6 +68,19 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_scoring_reasoning(raw_reasoning: Any) -> dict[str, str] | None:
+    if not isinstance(raw_reasoning, dict):
+        return None
+    normalized: dict[str, str] = {}
+    for key, value in raw_reasoning.items():
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            normalized[str(key)] = text
+    return normalized
 
 
 def _normalize_eval(raw: dict[str, Any]) -> dict[str, Any]:
@@ -79,6 +105,10 @@ def _normalize_eval(raw: dict[str, Any]) -> dict[str, Any]:
         "linked_issues": [int(_to_float(item, 0)) for item in raw.get("linked_issues", []) if item is not None],
         "agent_traces": raw.get("agent_traces", raw.get("agent_outputs", {})),
     }
+
+    scoring_reasoning = _normalize_scoring_reasoning(raw.get("scoring_reasoning"))
+    if scoring_reasoning is not None:
+        normalized["scoring_reasoning"] = scoring_reasoning
 
     if raw.get("state") is not None:
         normalized["state"] = str(raw.get("state"))
@@ -151,9 +181,13 @@ def push_partial_results(results: list[dict[str, Any]]) -> None:
             if previous == normalized:
                 continue
             _latest_by_pr[pr_number] = normalized
-            _pushed_pr_numbers.add(pr_number)
             changed = True
-            _push_or_log("evaluation", push_evaluation, normalized, _active_run_id)
+            if pr_number not in _pushed_pr_numbers:
+                _pushed_pr_numbers.add(pr_number)
+                _push_or_log("evaluation", push_evaluation, normalized, _active_run_id)
+                global _partial_push_count, _last_partial_push_at
+                _partial_push_count += 1
+                _last_partial_push_at = datetime.now(timezone.utc).isoformat()
             continue
 
         fp = _fingerprint(normalized)

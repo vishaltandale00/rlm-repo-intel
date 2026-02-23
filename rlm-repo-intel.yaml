@@ -28,6 +28,10 @@ pipeline:
   lm_request_retries: 2
   max_depth: 5
   max_iterations: 50
+  subtask_max_depth: 2
+  subtask_max_iterations: 12
+  subtask_timeout_seconds: 300
+  subtask_budget_pct: 0.60
   compaction_threshold_pct: 0.55
   output_contract_mode: strict_repl
   output_repair_attempts: 1

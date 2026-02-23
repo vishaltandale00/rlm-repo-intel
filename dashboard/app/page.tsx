@@ -23,6 +23,27 @@ function toNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+function normalizeScoringReasoning(value: unknown): EvaluationItem["scoring_reasoning"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const normalized: EvaluationItem["scoring_reasoning"] = {};
+  const keys: Array<keyof NonNullable<EvaluationItem["scoring_reasoning"]>> = [
+    "urgency",
+    "quality",
+    "criticality",
+    "risk_if_merged",
+  ];
+
+  for (const key of keys) {
+    const raw = source[key];
+    if (raw === null || raw === undefined) continue;
+    const text = typeof raw === "string" ? raw.trim() : String(raw).trim();
+    if (text) normalized[key] = text;
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
 function normalizeEvaluation(raw: unknown): EvaluationItem | null {
   if (!raw || typeof raw !== "object") return null;
   const item = raw as Record<string, unknown>;
@@ -80,6 +101,7 @@ function normalizeEvaluation(raw: unknown): EvaluationItem | null {
       item.agent_traces && typeof item.agent_traces === "object"
         ? (item.agent_traces as EvaluationItem["agent_traces"])
         : undefined,
+    scoring_reasoning: normalizeScoringReasoning(item.scoring_reasoning),
   };
 }
 

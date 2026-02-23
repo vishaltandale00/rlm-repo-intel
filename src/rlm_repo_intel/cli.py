@@ -1,5 +1,7 @@
 """CLI entry point for rlm-repo-intel."""
 
+import json
+
 import click
 
 from .config import load_config
@@ -49,6 +51,18 @@ def triage(ctx, budget):
         run_triage_main(config=cfg)
     except Exception:
         raise
+
+
+@main.command("triage-status")
+@click.option("--run-id", default=None, help="Specific run ID to inspect")
+@click.pass_context
+def triage_status_cmd(ctx, run_id):
+    """Show triage liveness/status for a run."""
+    from .run_triage import triage_status
+
+    status = triage_status(config=ctx.obj["config"], run_id=run_id)
+    click.echo(json.dumps(status, indent=2))
+    ctx.exit(int(status.get("exit_code", 5)))
 
 
 if __name__ == "__main__":

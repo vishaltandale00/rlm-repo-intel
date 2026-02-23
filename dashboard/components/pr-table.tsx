@@ -57,6 +57,15 @@ function stateBadgeClass(state?: string) {
   }
 }
 
+function ReasoningRow({ label, value }: { label: string; value?: string }) {
+  return (
+    <div className="rounded border border-neutral-800 bg-neutral-950/70 p-2">
+      <div className="mb-1 text-[10px] uppercase tracking-wide text-neutral-500">{label}</div>
+      <div className="text-xs text-neutral-200">{value || "n/a"}</div>
+    </div>
+  );
+}
+
 export function PRTable({ evaluations, ranking, selectedPR, onSelectPR }: PRTableProps) {
   const [query, setQuery] = useState("");
   const [stateFilter, setStateFilter] = useState("all");
@@ -89,6 +98,11 @@ export function PRTable({ evaluations, ranking, selectedPR, onSelectPR }: PRTabl
         return urgencyB - urgencyA;
       });
   }, [evaluations, query, sortBy, stateFilter]);
+
+  const selectedEvaluation = useMemo(
+    () => evaluations.find((evaluation) => evaluation.pr_number === selectedPR) ?? null,
+    [evaluations, selectedPR]
+  );
 
   if (evaluations.length === 0) {
     return <div className="text-neutral-500">No evaluations yet. Pipeline is running...</div>;
@@ -195,6 +209,32 @@ export function PRTable({ evaluations, ranking, selectedPR, onSelectPR }: PRTabl
           </table>
         </div>
       </div>
+      {selectedEvaluation ? (
+        <section className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3">
+          <div className="mb-2 text-xs uppercase tracking-wide text-neutral-500">
+            Score Reasoning for PR #{selectedEvaluation.pr_number}
+          </div>
+          <div className="mb-3 text-sm text-neutral-200">{selectedEvaluation.title}</div>
+          <div className="grid gap-2 md:grid-cols-2">
+            <ReasoningRow
+              label="Urgency"
+              value={selectedEvaluation.scoring_reasoning?.urgency}
+            />
+            <ReasoningRow
+              label="Quality"
+              value={selectedEvaluation.scoring_reasoning?.quality}
+            />
+            <ReasoningRow
+              label="Criticality"
+              value={selectedEvaluation.scoring_reasoning?.criticality}
+            />
+            <ReasoningRow
+              label="Risk If Merged"
+              value={selectedEvaluation.scoring_reasoning?.risk_if_merged}
+            />
+          </div>
+        </section>
+      ) : null}
       {filtered.length === 0 && <div className="text-neutral-500">No PRs match the current filters.</div>}
     </div>
   );

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import time
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,23 @@ from rlm_repo_intel.tools.repo_loader import (
     load_repo_to_repl,
 )
 from rlm_repo_intel.tools.search_tools import git_blame, git_log, web_search
+
+_LM_TELEMETRY_HOOKS: dict[str, Any] = {}
+
+
+def _set_lm_telemetry_hooks(hooks: dict[str, Any] | None) -> None:
+    global _LM_TELEMETRY_HOOKS
+    _LM_TELEMETRY_HOOKS = dict(hooks or {})
+
+
+def _emit_lm_telemetry_event(name: str, payload: dict[str, Any]) -> None:
+    hook = _LM_TELEMETRY_HOOKS.get(name)
+    if callable(hook):
+        try:
+            hook(payload)
+        except Exception:
+            # Telemetry must never break LM calls.
+            pass
 
 
 def _patch_rlm_litellm_kwargs_passthrough() -> None:
@@ -89,7 +107,44 @@ def _patch_rlm_litellm_kwargs_passthrough() -> None:
         if not selected_model:
             raise ValueError("Model name is required for LiteLLM client.")
 
-        response = litellm.completion(**_build_kwargs(client, messages, selected_model))
+        kwargs = _build_kwargs(client, messages, selected_model)
+        call_started = time.perf_counter()
+        _emit_lm_telemetry_event(
+            "lm_start",
+            {
+                "model": selected_model,
+                "timeout": kwargs.get("timeout"),
+                "num_retries": kwargs.get("num_retries", 0),
+            },
+        )
+        try:
+            response = litellm.completion(**kwargs)
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - call_started) * 1000)
+            _emit_lm_telemetry_event(
+                "lm_failure",
+                {
+                    "model": selected_model,
+                    "timeout": kwargs.get("timeout"),
+                    "num_retries": kwargs.get("num_retries", 0),
+                    "duration_ms": duration_ms,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "is_timeout": "timeout" in type(exc).__name__.lower()
+                    or "timeout" in str(exc).lower(),
+                },
+            )
+            raise
+        duration_ms = int((time.perf_counter() - call_started) * 1000)
+        _emit_lm_telemetry_event(
+            "lm_success",
+            {
+                "model": selected_model,
+                "timeout": kwargs.get("timeout"),
+                "num_retries": kwargs.get("num_retries", 0),
+                "duration_ms": duration_ms,
+            },
+        )
         client._track_cost(response, selected_model)
         return _strip_json_markdown_fences(response.choices[0].message.content)
 
@@ -107,7 +162,44 @@ def _patch_rlm_litellm_kwargs_passthrough() -> None:
         if not selected_model:
             raise ValueError("Model name is required for LiteLLM client.")
 
-        response = await litellm.acompletion(**_build_kwargs(client, messages, selected_model))
+        kwargs = _build_kwargs(client, messages, selected_model)
+        call_started = time.perf_counter()
+        _emit_lm_telemetry_event(
+            "lm_start",
+            {
+                "model": selected_model,
+                "timeout": kwargs.get("timeout"),
+                "num_retries": kwargs.get("num_retries", 0),
+            },
+        )
+        try:
+            response = await litellm.acompletion(**kwargs)
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - call_started) * 1000)
+            _emit_lm_telemetry_event(
+                "lm_failure",
+                {
+                    "model": selected_model,
+                    "timeout": kwargs.get("timeout"),
+                    "num_retries": kwargs.get("num_retries", 0),
+                    "duration_ms": duration_ms,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "is_timeout": "timeout" in type(exc).__name__.lower()
+                    or "timeout" in str(exc).lower(),
+                },
+            )
+            raise
+        duration_ms = int((time.perf_counter() - call_started) * 1000)
+        _emit_lm_telemetry_event(
+            "lm_success",
+            {
+                "model": selected_model,
+                "timeout": kwargs.get("timeout"),
+                "num_retries": kwargs.get("num_retries", 0),
+                "duration_ms": duration_ms,
+            },
+        )
         client._track_cost(response, selected_model)
         return _strip_json_markdown_fences(response.choices[0].message.content)
 
@@ -144,7 +236,86 @@ _patch_rlm_litellm_kwargs_passthrough()
 _patch_local_repl_safe_builtins()
 
 
-def create_frontier_rlm(config: dict[str, Any], run_id: str | None = None) -> RLM:
+_REQUIRED_SUBTASK_KEYS = (
+    "subtask_max_depth",
+    "subtask_max_iterations",
+    "subtask_timeout_seconds",
+    "subtask_budget_pct",
+)
+
+
+def _subtask_limits(pipeline_cfg: dict[str, Any]) -> dict[str, Any]:
+    missing = [key for key in _REQUIRED_SUBTASK_KEYS if key not in pipeline_cfg]
+    if missing:
+        raise KeyError(
+            "Missing pipeline subtask settings: " + ", ".join(missing)
+        )
+
+    limits = {
+        "max_depth": int(pipeline_cfg["subtask_max_depth"]),
+        "max_iterations": int(pipeline_cfg["subtask_max_iterations"]),
+        "timeout_seconds": int(pipeline_cfg["subtask_timeout_seconds"]),
+        "budget_pct": float(pipeline_cfg["subtask_budget_pct"]),
+    }
+    if limits["max_depth"] < 1:
+        raise ValueError("pipeline.subtask_max_depth must be >= 1")
+    if limits["max_iterations"] < 1:
+        raise ValueError("pipeline.subtask_max_iterations must be >= 1")
+    if limits["timeout_seconds"] < 1:
+        raise ValueError("pipeline.subtask_timeout_seconds must be >= 1")
+    if not 0.0 < limits["budget_pct"] <= 1.0:
+        raise ValueError("pipeline.subtask_budget_pct must be in (0.0, 1.0]")
+    return limits
+
+
+def _build_root_tools(pipeline_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Root gets orchestration-only tools; evidence access is delegated to sub-RLMs."""
+    return {
+        "ROLE_SYSTEM": ROLE_SYSTEM,
+        "ROLE_MODEL": ROLE_MODEL,
+        "SUBTASK_LIMITS": _subtask_limits(pipeline_cfg),
+        "push_partial_results": push_partial_results,
+        "push_trace_step": push_trace_step,
+    }
+
+
+def _build_sub_tools(
+    *,
+    repo: dict[str, Any],
+    repo_tree: str,
+    prs: list[dict[str, Any]],
+    issues: list[dict[str, Any]],
+    pr_table: str,
+    issue_table: str,
+    structural_graph: dict[str, Any],
+    repo_dir: str,
+    pipeline_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    """Delegates get full evidence/tool access."""
+    return {
+        "repo": repo,
+        "repo_tree": repo_tree,
+        "prs": prs,
+        "issues": issues,
+        "pr_table": pr_table,
+        "issue_table": issue_table,
+        "structural_graph": structural_graph,
+        "ROLE_SYSTEM": ROLE_SYSTEM,
+        "ROLE_MODEL": ROLE_MODEL,
+        "SUBTASK_LIMITS": _subtask_limits(pipeline_cfg),
+        "web_search": web_search,
+        "git_log": partial(git_log, repo_dir=repo_dir),
+        "git_blame": partial(git_blame, repo_dir=repo_dir),
+        "push_partial_results": push_partial_results,
+        "push_trace_step": push_trace_step,
+    }
+
+
+def create_frontier_rlm(
+    config: dict[str, Any],
+    run_id: str | None = None,
+    telemetry_hooks: dict[str, Any] | None = None,
+) -> RLM:
     from rlm_repo_intel.rlm_factory import _to_litellm_model_name
 
     # Load everything into memory
@@ -164,34 +335,29 @@ def create_frontier_rlm(config: dict[str, Any], run_id: str | None = None) -> RL
         Path(config["paths"]["repo_dir"]) / config["repo"]["owner"] / config["repo"]["name"]
     )
 
-    # All data goes into REPL variables — no tools needed except llm_query/rlm_query
-    # Also precompute summary tables as REPL vars so the model can print() them
+    # Precompute summary tables as delegate evidence variables.
     pr_table = build_pr_table(prs)
     issue_table = build_issue_table(issues)
 
     set_run_context(run_id)
     reset_run_state()
-
-    custom_tools = {
-        "repo": repo,
-        "repo_tree": repo_tree,
-        "prs": prs,
-        "issues": issues,
-        "pr_table": pr_table,
-        "issue_table": issue_table,
-        "structural_graph": structural_graph,
-        "ROLE_SYSTEM": ROLE_SYSTEM,
-        "ROLE_MODEL": ROLE_MODEL,
-        "web_search": web_search,
-        "git_log": partial(git_log, repo_dir=str(repo_dir)),
-        "git_blame": partial(git_blame, repo_dir=str(repo_dir)),
-        "push_partial_results": push_partial_results,
-        "push_trace_step": push_trace_step,
-    }
+    _set_lm_telemetry_hooks(telemetry_hooks)
 
     prompt_with_tables = ROOT_FRONTIER_PROMPT
     pipeline_cfg = config.get("pipeline", {})
     observability_cfg = pipeline_cfg.get("observability", {})
+    custom_tools = _build_root_tools(pipeline_cfg)
+    custom_sub_tools = _build_sub_tools(
+        repo=repo,
+        repo_tree=repo_tree,
+        prs=prs,
+        issues=issues,
+        pr_table=pr_table,
+        issue_table=issue_table,
+        structural_graph=structural_graph,
+        repo_dir=str(repo_dir),
+        pipeline_cfg=pipeline_cfg,
+    )
     request_timeout_seconds = float(pipeline_cfg.get("lm_request_timeout_seconds", 900.0))
     request_retries = int(pipeline_cfg.get("lm_request_retries", 2))
     model_name = _to_litellm_model_name(config.get("models", {}).get("root", "claude-sonnet-4-6"))
@@ -216,17 +382,29 @@ def create_frontier_rlm(config: dict[str, Any], run_id: str | None = None) -> RL
         del system_prompt
         preview = (task or "").strip().replace("\n", " ")
         push_trace_step(depth, "subcall_start", f"Sub-agent: {preview[:200]}")
+        hook = (telemetry_hooks or {}).get("subcall_start")
+        if callable(hook):
+            try:
+                hook({"depth": depth, "task_preview": preview[:200]})
+            except Exception:
+                pass
 
     def _on_subcall_complete(depth: int, task: str, cost: float, result: str | None) -> None:
         del task, result
         push_trace_step(depth, "subcall_complete", f"Sub-agent done: cost=${float(cost):.4f}")
+        hook = (telemetry_hooks or {}).get("subcall_complete")
+        if callable(hook):
+            try:
+                hook({"depth": depth, "cost": float(cost)})
+            except Exception:
+                pass
 
     return RLM(
         backend="litellm",
         backend_kwargs=backend_kwargs,
         custom_system_prompt=prompt_with_tables,
         custom_tools=custom_tools,
-        custom_sub_tools={},  # sub-agents get no tools, just llm_query
+        custom_sub_tools=custom_sub_tools,
         logger=logger,
         persistent=True,
         compaction=True,
